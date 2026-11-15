@@ -684,7 +684,7 @@ export const SportsView: React.FC<SportsViewProps> = ({
                 className="bg-[#051c10]/95 border border-[#00e700]/25 rounded-xl p-2.5 space-y-1.5"
               >
                 <div className="flex items-center justify-between text-[10px] text-zinc-400 font-bold">
-                  <span className="truncate">{rec.league} · Round #{rec.roundNumber}</span>
+                  <span className="truncate">{rec.league} · R#{rec.roundNumber} · FT</span>
                   <span className="font-mono shrink-0">
                     {new Date(rec.playedAt).toLocaleDateString([], { month: 'short', day: 'numeric' })} · {new Date(rec.playedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                   </span>
@@ -698,12 +698,6 @@ export const SportsView: React.FC<SportsViewProps> = ({
                   </span>
                   <span className={`flex-1 truncate text-right ${rec.awayScore > rec.homeScore ? 'text-[#00e700]' : 'text-white'}`}>
                     {rec.awayTeam}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between text-[10px] text-zinc-400">
-                  <span>HT: {rec.firstHalfHomeScore} - {rec.firstHalfAwayScore}</span>
-                  <span>
-                    1st Goal: {rec.firstGoalTeam === 'home' ? rec.homeTeam : rec.firstGoalTeam === 'away' ? rec.awayTeam : 'None'}
                   </span>
                 </div>
               </div>

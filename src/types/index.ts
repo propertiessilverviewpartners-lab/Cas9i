@@ -145,6 +145,8 @@ export interface PlacedBet {
   type: 'single' | 'accumulator';
   selections: BetSelection[];
   stake: number;
+  originalStake?: number;
+  liveHalfApplied?: boolean;
   totalOdds: number;
   potentialPayout: number;
   status: 'OPEN' | 'WON' | 'LOST' | 'CASHED_OUT';

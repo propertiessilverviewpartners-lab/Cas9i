@@ -66,23 +66,30 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({
     .sort((a, b) => b.playedAt - a.playedAt);
 
   // Individual previous meetings with other clubs (excluding direct meetings between the two)
-  const homeOtherH2H = h2hRecords
-    .filter(
-      r =>
-        (sameTeam(r.homeTeam, match.homeTeam) && !sameTeam(r.awayTeam, match.awayTeam)) ||
-        (sameTeam(r.awayTeam, match.homeTeam) && !sameTeam(r.homeTeam, match.awayTeam))
-    )
-    .sort((a, b) => b.playedAt - a.playedAt)
-    .slice(0, 12);
+  const getOtherClubH2H = (clubName: string, excludeOpponent: string) => {
+    const filtered = h2hRecords
+      .filter(
+        r =>
+          (sameTeam(r.homeTeam, clubName) && !sameTeam(r.awayTeam, excludeOpponent)) ||
+          (sameTeam(r.awayTeam, clubName) && !sameTeam(r.homeTeam, excludeOpponent))
+      )
+      .sort((a, b) => b.playedAt - a.playedAt);
 
-  const awayOtherH2H = h2hRecords
-    .filter(
-      r =>
-        (sameTeam(r.homeTeam, match.awayTeam) && !sameTeam(r.awayTeam, match.homeTeam)) ||
-        (sameTeam(r.awayTeam, match.awayTeam) && !sameTeam(r.homeTeam, match.homeTeam))
-    )
-    .sort((a, b) => b.playedAt - a.playedAt)
-    .slice(0, 12);
+    const perOpponentCount = new Map<string, number>();
+    const picked: H2HRecord[] = [];
+    for (const rec of filtered) {
+      const opp = (sameTeam(rec.homeTeam, clubName) ? rec.awayTeam : rec.homeTeam).trim().toLowerCase();
+      const count = perOpponentCount.get(opp) || 0;
+      if (count >= 3) continue;
+      perOpponentCount.set(opp, count + 1);
+      picked.push(rec);
+      if (picked.length >= 8) break;
+    }
+    return picked;
+  };
+
+  const homeOtherH2H = getOtherClubH2H(match.homeTeam, match.awayTeam);
+  const awayOtherH2H = getOtherClubH2H(match.awayTeam, match.homeTeam);
 
   let homeWins = 0;
   let awayWins = 0;
@@ -230,7 +237,7 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({
           )}
 
           {/* Market Section Filter */}
-          <div className="flex items-center gap-1.5 mt-2.5 overflow-x-auto no-scrollbar pb-0.5">
+          <div className="grid grid-cols-3 sm:grid-cols-6 gap-1 mt-2">
             {[
               { id: 'ALL', label: 'All (8)' },
               { id: '1X2', label: 'Main' },
@@ -245,7 +252,7 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({
                   soundManager.playClick();
                   setActiveMarketTab(tab.id as 'ALL' | '1X2' | 'HALVES' | 'OU' | 'SCORE' | 'H2H');
                 }}
-                className={`shrink-0 py-1.5 px-2.5 rounded-lg text-[10px] sm:text-[11px] font-black transition-all whitespace-nowrap ${
+                className={`py-1.5 px-1.5 rounded-lg text-[10px] sm:text-[11px] font-black transition-all whitespace-nowrap text-center truncate ${
                   activeMarketTab === tab.id
                     ? 'bg-[#00ad3a] text-white shadow-[0_0_10px_rgba(0,231,0,0.3)]'
                     : 'bg-[#03150b] text-zinc-300 hover:text-white border border-zinc-800'
@@ -609,11 +616,11 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({
             </div>
           )}
 
-          {/* 9. Head-to-Head: Direct Meetings First, Individual Club Meetings Underneath */}
+          {/* 9. Head-to-Head: Direct Meetings First, Individual Club Meetings Underneath (Final Results Only) */}
           {showH2H && (
-            <div className="space-y-3">
+            <div className="space-y-2.5">
               {/* Section 1: Direct Previous Meetings between these two clubs */}
-              <div className="bg-[#062416] p-2.5 sm:p-3 rounded-xl border border-[#00e700]/25 space-y-2.5">
+              <div className="bg-[#062416] p-2.5 rounded-xl border border-[#00e700]/25 space-y-2">
                 <div className="flex items-center justify-between gap-2">
                   <div className="min-w-0">
                     <div className="flex items-center gap-1.5">
@@ -623,7 +630,7 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({
                       </span>
                     </div>
                     <span className="text-[10px] text-zinc-400 font-semibold block truncate mt-0.5">
-                      {match.homeTeam} vs {match.awayTeam} ({pairH2H.length} recorded)
+                      {match.homeTeam} vs {match.awayTeam} ({pairH2H.length} completed)
                     </span>
                   </div>
                   <button
@@ -631,7 +638,7 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({
                       soundManager.playClick();
                       setActiveMarketTab('ALL');
                     }}
-                    className="px-2.5 py-1.5 rounded-lg bg-[#03150b] hover:bg-[#0b3e24] border border-[#00e700]/30 text-[10px] sm:text-[11px] font-bold text-[#00e700] flex items-center gap-1 whitespace-nowrap shrink-0"
+                    className="px-2.5 py-1.5 rounded-lg bg-[#03150b] hover:bg-[#0b3e24] border border-[#00e700]/30 text-[10px] font-bold text-[#00e700] flex items-center gap-1 whitespace-nowrap shrink-0"
                   >
                     <span>Markets</span>
                     <ArrowRight className="w-3 h-3" />
@@ -639,36 +646,36 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({
                 </div>
 
                 {/* H2H Summary Stats */}
-                <div className="grid grid-cols-4 gap-1.5 text-center bg-[#03150b] p-2 rounded-lg border border-zinc-800">
+                <div className="grid grid-cols-4 gap-1 text-center bg-[#03150b] p-1.5 rounded-lg border border-zinc-800">
                   <div className="min-w-0">
-                    <span className="text-[9px] sm:text-[10px] text-zinc-400 font-bold block truncate">
+                    <span className="text-[9px] text-zinc-400 font-bold block truncate">
                       {match.homeTeam}
                     </span>
-                    <span className="text-xs sm:text-sm font-black text-[#00e700] tabular-nums">{homeWins}W</span>
+                    <span className="text-xs font-black text-[#00e700] tabular-nums">{homeWins}W</span>
                   </div>
                   <div>
-                    <span className="text-[9px] sm:text-[10px] text-zinc-400 font-bold block">Draws</span>
-                    <span className="text-xs sm:text-sm font-black text-amber-400 tabular-nums">{draws}D</span>
+                    <span className="text-[9px] text-zinc-400 font-bold block">Draws</span>
+                    <span className="text-xs font-black text-amber-400 tabular-nums">{draws}D</span>
                   </div>
                   <div className="min-w-0">
-                    <span className="text-[9px] sm:text-[10px] text-zinc-400 font-bold block truncate">
+                    <span className="text-[9px] text-zinc-400 font-bold block truncate">
                       {match.awayTeam}
                     </span>
-                    <span className="text-xs sm:text-sm font-black text-cyan-400 tabular-nums">{awayWins}W</span>
+                    <span className="text-xs font-black text-cyan-400 tabular-nums">{awayWins}W</span>
                   </div>
                   <div>
-                    <span className="text-[9px] sm:text-[10px] text-zinc-400 font-bold block">Avg Goals</span>
-                    <span className="text-xs sm:text-sm font-black text-white tabular-nums">
+                    <span className="text-[9px] text-zinc-400 font-bold block">Avg Goals</span>
+                    <span className="text-xs font-black text-white tabular-nums">
                       {pairH2H.length > 0 ? (totalGoalsSum / pairH2H.length).toFixed(1) : '0.0'}
                     </span>
                   </div>
                 </div>
 
-                {/* All Previous Direct Meetings */}
+                {/* All Previous Direct Meetings (Final Score Only) */}
                 <div className="space-y-1.5">
                   {pairH2H.length === 0 ? (
-                    <div className="text-center py-3 px-3 bg-[#03150b]/70 rounded-lg border border-zinc-800 text-[11px] text-zinc-400">
-                      No previous direct meetings recorded yet between {match.homeTeam} and {match.awayTeam}. Completed rounds automatically appear here with date and final score.
+                    <div className="text-center py-2.5 px-3 bg-[#03150b]/70 rounded-lg border border-zinc-800 text-[10px] sm:text-[11px] text-zinc-400">
+                      No previous direct meetings recorded yet between {match.homeTeam} and {match.awayTeam}. Final results appear here once a match finishes.
                     </div>
                   ) : (
                     pairH2H.map((rec, idx) => {
@@ -684,13 +691,13 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({
                       return (
                         <div
                           key={rec.id}
-                          className={`bg-[#03150b] px-2.5 py-2 rounded-lg border space-y-1 ${
+                          className={`bg-[#03150b] px-2.5 py-1.5 rounded-lg border space-y-1 ${
                             isLatestPrevious ? 'border-[#00e700]/45' : 'border-zinc-800/80'
                           }`}
                         >
-                          <div className="flex items-center justify-between gap-2 text-[10px] text-zinc-400 font-semibold">
+                          <div className="flex items-center justify-between gap-2 text-[9.5px] sm:text-[10px] text-zinc-400 font-semibold">
                             <span className="truncate">
-                              {formatMatchDateTime(rec.playedAt)} · {rec.isZoom ? 'Zoom 90s' : "Virtual 60'"} · R#{rec.roundNumber}
+                              {formatMatchDateTime(rec.playedAt)} · {rec.isZoom ? 'Zoom' : 'Virtual'} · FT
                             </span>
                             <span
                               className={`shrink-0 font-bold ${
@@ -701,7 +708,7 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({
                             </span>
                           </div>
 
-                          <div className="flex items-center justify-between gap-2 text-[11px] sm:text-xs font-black">
+                          <div className="flex items-center justify-between gap-2 text-[11px] font-black">
                             <span className={`flex-1 truncate ${homeWin ? 'text-[#00e700]' : 'text-white'}`}>
                               {rec.homeTeam}
                             </span>
@@ -712,20 +719,6 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({
                               {rec.awayTeam}
                             </span>
                           </div>
-
-                          <div className="flex items-center justify-between text-[10px] text-zinc-400">
-                            <span>HT: {rec.firstHalfHomeScore} - {rec.firstHalfAwayScore}</span>
-                            <span className="truncate pl-2">
-                              1st Goal:{' '}
-                              <span className="text-zinc-200 font-semibold">
-                                {rec.firstGoalTeam === 'home'
-                                  ? rec.homeTeam
-                                  : rec.firstGoalTeam === 'away'
-                                  ? rec.awayTeam
-                                  : 'None'}
-                              </span>
-                            </span>
-                          </div>
                         </div>
                       );
                     })
@@ -733,37 +726,37 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({
                 </div>
               </div>
 
-              {/* Section 2: Individual Previous Meetings with Other Clubs */}
-              <div className="space-y-2">
+              {/* Section 2: Individual Previous Meetings with Other Clubs (Final Result Only) */}
+              <div className="space-y-1.5">
                 <div className="flex items-center justify-between px-1">
                   <span className="text-[11px] sm:text-xs font-black text-white uppercase tracking-wider">
-                    Individual Meetings vs Other Clubs
+                    Previous Meetings vs Other Clubs
                   </span>
-                  <span className="text-[10px] text-zinc-400 font-semibold">Date &amp; Result</span>
+                  <span className="text-[9.5px] text-zinc-400 font-semibold">Final Result (FT)</span>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                   {[
                     { clubName: match.homeTeam, records: homeOtherH2H },
                     { clubName: match.awayTeam, records: awayOtherH2H },
                   ].map(group => (
                     <div
                       key={group.clubName}
-                      className="bg-[#062416] p-2.5 rounded-xl border border-[#00e700]/20 space-y-2"
+                      className="bg-[#062416] p-2 rounded-xl border border-[#00e700]/20 space-y-1.5"
                     >
-                      <div className="flex items-center justify-between gap-2 pb-1.5 border-b border-zinc-800/80">
-                        <span className="text-xs font-black text-white truncate">{group.clubName}</span>
+                      <div className="flex items-center justify-between gap-2 pb-1 border-b border-zinc-800/80">
+                        <span className="text-[11px] sm:text-xs font-black text-white truncate">{group.clubName}</span>
                         <span className="text-[10px] font-bold text-[#00e700] tabular-nums shrink-0">
                           {getClubFormSummary(group.clubName, group.records)}
                         </span>
                       </div>
 
                       {group.records.length === 0 ? (
-                        <div className="text-center py-3 px-2 bg-[#03150b]/60 rounded-lg border border-zinc-800/80 text-[10px] sm:text-[11px] text-zinc-400">
-                          No previous matches against other clubs recorded yet for {group.clubName}.
+                        <div className="text-center py-2.5 px-2 bg-[#03150b]/60 rounded-lg border border-zinc-800/80 text-[10px] text-zinc-400">
+                          No completed matches against other clubs yet for {group.clubName}.
                         </div>
                       ) : (
-                        <div className="space-y-1.5">
+                        <div className="space-y-1">
                           {group.records.map(rec => {
                             const isClubHome = sameTeam(rec.homeTeam, group.clubName);
                             const clubScore = isClubHome ? rec.homeScore : rec.awayScore;
@@ -780,28 +773,25 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({
                             return (
                               <div
                                 key={`${group.clubName}-${rec.id}`}
-                                className="bg-[#03150b] px-2.5 py-1.5 rounded-lg border border-zinc-800/80 space-y-1"
+                                className="bg-[#03150b] px-2 py-1.5 rounded-lg border border-zinc-800/80 flex items-center justify-between gap-2"
                               >
-                                <div className="flex items-center justify-between gap-2 text-[10px] text-zinc-400">
-                                  <span className="truncate">{formatCompactDateTime(rec.playedAt)}</span>
-                                  <span className="shrink-0 font-semibold">
-                                    {isClubHome ? 'Home' : 'Away'} · HT {isClubHome ? `${rec.firstHalfHomeScore}-${rec.firstHalfAwayScore}` : `${rec.firstHalfAwayScore}-${rec.firstHalfHomeScore}`}
+                                <div className="min-w-0 flex-1">
+                                  <span className="text-[9.5px] text-zinc-400 font-medium block truncate">
+                                    {formatCompactDateTime(rec.playedAt)} · {isClubHome ? 'Home' : 'Away'} · FT
                                   </span>
-                                </div>
-                                <div className="flex items-center justify-between gap-2">
-                                  <span className="text-[11px] font-bold text-zinc-100 truncate min-w-0">
+                                  <span className="text-[11px] font-bold text-zinc-100 block truncate">
                                     {isClubHome ? 'vs' : '@'} {opponent}
                                   </span>
-                                  <div className="flex items-center gap-1.5 shrink-0">
-                                    <span className="font-mono text-[11px] font-black text-amber-400 tabular-nums">
-                                      {clubScore} - {oppScore}
-                                    </span>
-                                    <span
-                                      className={`w-5 h-5 rounded text-[10px] font-black flex items-center justify-center border ${outcomeClass}`}
-                                    >
-                                      {outcome}
-                                    </span>
-                                  </div>
+                                </div>
+                                <div className="flex items-center gap-1.5 shrink-0">
+                                  <span className="px-1.5 py-0.5 rounded bg-[#072616] border border-[#00e700]/25 font-mono text-[11px] font-black text-amber-400 tabular-nums">
+                                    {clubScore} - {oppScore}
+                                  </span>
+                                  <span
+                                    className={`w-5 h-5 rounded text-[10px] font-black flex items-center justify-center border ${outcomeClass}`}
+                                  >
+                                    {outcome}
+                                  </span>
                                 </div>
                               </div>
                             );

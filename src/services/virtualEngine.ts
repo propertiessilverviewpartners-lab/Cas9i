@@ -753,64 +753,269 @@ class VirtualEngineService {
     return allResolved ? 'WON' : 'OPEN';
   }
 
-  public calculateCashout(bet: PlacedBet): number {
-    if (bet.status !== 'OPEN') return 0;
-    const settled = this.evaluateBetSettlement(bet);
-    if (settled === 'LOST') return 0;
-    if (settled === 'WON') return bet.potentialPayout;
-
-    let probabilityWeight = 1.0;
-
+  public hasBetGoneLive(bet: PlacedBet): boolean {
     for (const sel of bet.selections) {
+      const hasFinishedRound = this.h2hRecords.some(
+        r => r.matchId === sel.matchId && r.playedAt >= bet.timestamp
+      );
+      if (hasFinishedRound) return true;
+
       const match = this.matches.find(m => m.id === sel.matchId);
-      if (!match) continue;
+      if (match && (match.status === 'LIVE' || match.status === 'FINISHED')) {
+        return true;
+      }
+    }
+    return false;
+  }
 
-      const totalGoals = match.homeScore + match.awayScore;
-      const firstHalfGoals = (match.firstHalfHomeScore || 0) + (match.firstHalfAwayScore || 0);
-      const homeWon = match.homeScore > match.awayScore;
-      const awayWon = match.awayScore > match.homeScore;
-      const draw = match.homeScore === match.awayScore;
+  private evaluateLiveSelectionProgress(sel: BetSelection, match: VirtualMatch): {
+    progress: number;
+    isDefinitiveLoss: boolean;
+    isCurrentlyLosing: boolean;
+  } {
+    const totalGoals = match.homeScore + match.awayScore;
+    const htHome = match.firstHalfHomeScore || 0;
+    const htAway = match.firstHalfAwayScore || 0;
+    const htTotal = htHome + htAway;
+    const shHome = Math.max(0, match.homeScore - htHome);
+    const shAway = Math.max(0, match.awayScore - htAway);
+    const shTotal = shHome + shAway;
+    const homeWon = match.homeScore > match.awayScore;
+    const awayWon = match.awayScore > match.homeScore;
+    const draw = match.homeScore === match.awayScore;
+    const minute = match.minute || 0;
 
-      if (match.status === 'LIVE') {
-        if (sel.marketType === '1st Goal' && match.firstGoalTeam) {
-          const wonFirstGoal =
-            (sel.selection === 'Home' && match.firstGoalTeam === 'home') ||
-            (sel.selection === 'Away' && match.firstGoalTeam === 'away');
-          probabilityWeight *= wonFirstGoal ? 1.35 : 0.1;
-        } else if (sel.marketName === '1st Half O/U 15') {
-          if (sel.selection === 'Over 15') {
-            probabilityWeight *= firstHalfGoals > 15 ? 1.35 : match.minute > 30 ? 0.1 : 0.9;
-          } else {
-            probabilityWeight *= firstHalfGoals >= 15 ? 0.1 : 1.05;
+    if (sel.marketType === '1X2') {
+      if (sel.selection === 'Home & O15' || sel.selection === '1') {
+        if (homeWon && totalGoals > 15) return { progress: 1, isDefinitiveLoss: false, isCurrentlyLosing: false };
+        if (homeWon) {
+          const prog = totalGoals >= 12 ? 0.8 + Math.min(0.16, (totalGoals - 12) * 0.04) : Math.min(0.75, 0.25 + (totalGoals / 16) * 0.5);
+          return { progress: prog, isDefinitiveLoss: false, isCurrentlyLosing: false };
+        }
+        return { progress: 0, isDefinitiveLoss: false, isCurrentlyLosing: true };
+      }
+      if (sel.selection === 'Away & O15' || sel.selection === '2') {
+        if (awayWon && totalGoals > 15) return { progress: 1, isDefinitiveLoss: false, isCurrentlyLosing: false };
+        if (awayWon) {
+          const prog = totalGoals >= 12 ? 0.8 + Math.min(0.16, (totalGoals - 12) * 0.04) : Math.min(0.75, 0.25 + (totalGoals / 16) * 0.5);
+          return { progress: prog, isDefinitiveLoss: false, isCurrentlyLosing: false };
+        }
+        return { progress: 0, isDefinitiveLoss: false, isCurrentlyLosing: true };
+      }
+      if (sel.selection === 'Draw' || sel.selection === 'X') {
+        if (draw) {
+          const prog = minute >= 48 ? Math.min(0.96, 0.8 + ((minute - 48) / 12) * 0.16) : Math.min(0.75, (minute / 48) * 0.75);
+          return { progress: prog, isDefinitiveLoss: false, isCurrentlyLosing: false };
+        }
+        return { progress: 0, isDefinitiveLoss: false, isCurrentlyLosing: true };
+      }
+    }
+
+    if (sel.marketType === '1st Goal') {
+      if (match.firstGoalTeam) {
+        const wonFirstGoal =
+          (sel.selection === 'Home' && match.firstGoalTeam === 'home') ||
+          (sel.selection === 'Away' && match.firstGoalTeam === 'away');
+        return wonFirstGoal
+          ? { progress: 1, isDefinitiveLoss: false, isCurrentlyLosing: false }
+          : { progress: 0, isDefinitiveLoss: true, isCurrentlyLosing: true };
+      }
+      return { progress: 0, isDefinitiveLoss: false, isCurrentlyLosing: false };
+    }
+
+    if (sel.marketType === '5 Min Goal') {
+      if (sel.selection === 'Yes') {
+        if (match.hadFiveMinGoal) return { progress: 1, isDefinitiveLoss: false, isCurrentlyLosing: false };
+        if (minute > 5) return { progress: 0, isDefinitiveLoss: true, isCurrentlyLosing: true };
+        return { progress: 0, isDefinitiveLoss: false, isCurrentlyLosing: false };
+      }
+      if (sel.selection === 'No') {
+        if (match.hadFiveMinGoal) return { progress: 0, isDefinitiveLoss: true, isCurrentlyLosing: true };
+        if (minute > 5) return { progress: 1, isDefinitiveLoss: false, isCurrentlyLosing: false };
+        return { progress: Math.min(0.75, (minute / 6) * 0.75), isDefinitiveLoss: false, isCurrentlyLosing: false };
+      }
+      if (sel.selection === 'Over 5 Goals') {
+        if (totalGoals > 5) return { progress: 1, isDefinitiveLoss: false, isCurrentlyLosing: false };
+        return { progress: Math.min(0.75, (totalGoals / 6) * 0.8), isDefinitiveLoss: false, isCurrentlyLosing: totalGoals === 0 && minute >= 15 };
+      }
+    }
+
+    if (sel.marketName === '1st Half O/U 15') {
+      if (sel.selection === 'Over 15') {
+        if (htTotal > 15) return { progress: 1, isDefinitiveLoss: false, isCurrentlyLosing: false };
+        if (minute > 30) return { progress: 0, isDefinitiveLoss: true, isCurrentlyLosing: true };
+        if (htTotal >= 13) return { progress: 0.8 + (htTotal - 13) * 0.06, isDefinitiveLoss: false, isCurrentlyLosing: false };
+        return { progress: Math.min(0.75, (htTotal / 16) * 0.85), isDefinitiveLoss: false, isCurrentlyLosing: minute >= 20 && htTotal < 8 };
+      } else {
+        if (htTotal >= 15) return { progress: 0, isDefinitiveLoss: true, isCurrentlyLosing: true };
+        if (minute > 30) return { progress: 1, isDefinitiveLoss: false, isCurrentlyLosing: false };
+        if (minute >= 24) return { progress: 0.8 + ((minute - 24) / 6) * 0.15, isDefinitiveLoss: false, isCurrentlyLosing: false };
+        return { progress: Math.min(0.75, (minute / 30) * 0.8), isDefinitiveLoss: false, isCurrentlyLosing: false };
+      }
+    }
+
+    if (sel.marketType === '1st Half') {
+      const htHomeWon = htHome > htAway;
+      const htAwayWon = htAway > htHome;
+      const htDraw = htHome === htAway;
+      const sideWon =
+        (sel.selection === 'Home & O10' && htHomeWon) ||
+        (sel.selection === 'Away & O10' && htAwayWon) ||
+        (sel.selection === 'X & O10' && htDraw);
+
+      if (minute > 30) {
+        return sideWon && htTotal > 10
+          ? { progress: 1, isDefinitiveLoss: false, isCurrentlyLosing: false }
+          : { progress: 0, isDefinitiveLoss: true, isCurrentlyLosing: true };
+      }
+      if (sideWon && htTotal > 10) return { progress: 0.96, isDefinitiveLoss: false, isCurrentlyLosing: false };
+      if (sideWon && htTotal >= 9) return { progress: 0.82, isDefinitiveLoss: false, isCurrentlyLosing: false };
+      if (!sideWon) return { progress: 0, isDefinitiveLoss: false, isCurrentlyLosing: true };
+      return { progress: Math.min(0.75, (htTotal / 11) * 0.78), isDefinitiveLoss: false, isCurrentlyLosing: false };
+    }
+
+    if (sel.marketType === '2nd Half') {
+      if (minute <= 30) return { progress: 0, isDefinitiveLoss: false, isCurrentlyLosing: false };
+      const shHomeWon = shHome > shAway;
+      const shAwayWon = shAway > shHome;
+      const shDraw = shHome === shAway;
+      const sideWon =
+        (sel.selection === 'Home & O15' && shHomeWon) ||
+        (sel.selection === 'Away & O15' && shAwayWon) ||
+        (sel.selection === 'X & O15' && shDraw);
+
+      if (!sideWon) return { progress: 0, isDefinitiveLoss: false, isCurrentlyLosing: true };
+      if (shTotal > 15) return { progress: minute >= 50 ? 0.94 : 0.85, isDefinitiveLoss: false, isCurrentlyLosing: false };
+      if (shTotal >= 12) return { progress: 0.8, isDefinitiveLoss: false, isCurrentlyLosing: false };
+      return { progress: Math.min(0.75, (shTotal / 16) * 0.8), isDefinitiveLoss: false, isCurrentlyLosing: false };
+    }
+
+    if (sel.marketType === 'Odd/Even') {
+      const isOdd = totalGoals % 2 !== 0;
+      const matchesParity = (sel.selection === 'Odd' && isOdd) || (sel.selection === 'Even' && !isOdd);
+      if (matchesParity && minute >= 48) {
+        return { progress: 0.8 + ((minute - 48) / 12) * 0.12, isDefinitiveLoss: false, isCurrentlyLosing: false };
+      }
+      return { progress: matchesParity ? Math.min(0.7, (minute / 60) * 0.7) : 0, isDefinitiveLoss: false, isCurrentlyLosing: !matchesParity };
+    }
+
+    if (sel.marketType === 'Over/Under') {
+      const parts = sel.selection.split(' ');
+      const side = parts[0];
+      const line = Number(parts[1]);
+      if (!Number.isNaN(line)) {
+        if (side === 'Over') {
+          if (totalGoals > line) return { progress: 1, isDefinitiveLoss: false, isCurrentlyLosing: false };
+          if (totalGoals >= line) return { progress: 0.84, isDefinitiveLoss: false, isCurrentlyLosing: false };
+          return {
+            progress: Math.min(0.78, (totalGoals / (line + 1)) * 0.9),
+            isDefinitiveLoss: false,
+            isCurrentlyLosing: minute >= 40 && totalGoals < line * 0.55,
+          };
+        } else {
+          if (totalGoals >= line) return { progress: 0, isDefinitiveLoss: true, isCurrentlyLosing: true };
+          if (minute >= 48) {
+            return { progress: 0.8 + ((minute - 48) / 12) * 0.14, isDefinitiveLoss: false, isCurrentlyLosing: false };
           }
-        } else if (sel.marketType === 'Over/Under') {
-          const parts = sel.selection.split(' ');
-          const side = parts[0];
-          const line = Number(parts[1]);
-          if (!Number.isNaN(line)) {
-            if (side === 'Over') {
-              probabilityWeight *= totalGoals > line ? 1.35 : 0.9;
-            } else {
-              probabilityWeight *= totalGoals >= line ? 0.1 : 1.05;
-            }
-          }
-        } else if (sel.selection.startsWith('Home')) {
-          if (homeWon) probabilityWeight *= 1.25;
-          else if (awayWon) probabilityWeight *= 0.35;
-          else probabilityWeight *= 0.85;
-        } else if (sel.selection.startsWith('Away')) {
-          if (awayWon) probabilityWeight *= 1.30;
-          else if (homeWon) probabilityWeight *= 0.30;
-          else probabilityWeight *= 0.80;
-        } else if (sel.selection === 'Draw' || sel.selection.startsWith('X')) {
-          if (draw) probabilityWeight *= (match.minute > 45 ? 1.4 : 1.05);
-          else probabilityWeight *= 0.45;
+          return { progress: Math.min(0.75, (minute / 60) * 0.8), isDefinitiveLoss: false, isCurrentlyLosing: false };
         }
       }
     }
 
-    const calculated = bet.stake * (1 + (bet.totalOdds - 1) * probabilityWeight * 0.7);
-    return Math.max(1, Math.min(Math.round(calculated * 100) / 100, bet.potentialPayout * 0.95));
+    if (sel.marketType === 'Correct Score') {
+      const [tH, tA] = sel.selection.split(':').map(Number);
+      if (!Number.isNaN(tH) && !Number.isNaN(tA)) {
+        if (match.homeScore > tH || match.awayScore > tA) {
+          return { progress: 0, isDefinitiveLoss: true, isCurrentlyLosing: true };
+        }
+        if (match.homeScore === tH && match.awayScore === tA && minute >= 50) {
+          return { progress: 0.82 + ((minute - 50) / 10) * 0.12, isDefinitiveLoss: false, isCurrentlyLosing: false };
+        }
+      }
+      return { progress: 0, isDefinitiveLoss: false, isCurrentlyLosing: false };
+    }
+
+    return { progress: 0, isDefinitiveLoss: false, isCurrentlyLosing: false };
+  }
+
+  public calculateCashout(bet: PlacedBet): number {
+    if (bet.status !== 'OPEN' || bet.selections.length === 0) return 0;
+
+    let totalProgress = 0;
+    let hasDefinitiveLoss = false;
+    let hasLosingLiveLeg = false;
+    let anyStartedOrFinished = false;
+
+    for (const sel of bet.selections) {
+      const matchingRecords = this.h2hRecords
+        .filter(r => r.matchId === sel.matchId && r.playedAt >= bet.timestamp)
+        .sort((a, b) => a.playedAt - b.playedAt);
+
+      const roundResult = matchingRecords[0];
+      if (roundResult) {
+        anyStartedOrFinished = true;
+        const won = this.evaluateSelectionAgainstResult(sel, roundResult);
+        if (!won) {
+          hasDefinitiveLoss = true;
+        } else {
+          totalProgress += 1;
+        }
+        continue;
+      }
+
+      const match = this.matches.find(m => m.id === sel.matchId);
+      if (!match) continue;
+
+      if (match.status === 'FINISHED') {
+        anyStartedOrFinished = true;
+        const won = this.evaluateSelectionAgainstResult(sel, {
+          homeScore: match.homeScore,
+          awayScore: match.awayScore,
+          firstHalfHomeScore: match.firstHalfHomeScore || 0,
+          firstHalfAwayScore: match.firstHalfAwayScore || 0,
+          firstGoalTeam: match.firstGoalTeam,
+          hadFiveMinGoal: match.hadFiveMinGoal,
+        });
+        if (!won) {
+          hasDefinitiveLoss = true;
+        } else {
+          totalProgress += 1;
+        }
+        continue;
+      }
+
+      if (match.status === 'LIVE') {
+        anyStartedOrFinished = true;
+        const legState = this.evaluateLiveSelectionProgress(sel, match);
+        if (legState.isDefinitiveLoss) hasDefinitiveLoss = true;
+        if (legState.isCurrentlyLosing) hasLosingLiveLeg = true;
+        totalProgress += legState.progress;
+      }
+    }
+
+    // Cancel cash out offer if losing or not yet winning at least 80% of the ticket
+    if (!anyStartedOrFinished || hasDefinitiveLoss || hasLosingLiveLeg) {
+      return 0;
+    }
+
+    const overallWinProgress = totalProgress / bet.selections.length;
+    if (overallWinProgress < 0.8) {
+      return 0;
+    }
+
+    // Remaining 50% stake basis once bet goes live
+    const origStake = bet.originalStake ?? (bet.liveHalfApplied ? bet.stake * 2 : bet.stake);
+    const remainingStake = bet.liveHalfApplied ? bet.stake : Math.round(origStake * 0.5 * 100) / 100;
+    const remainingMaxPayout = bet.potentialPayout * 0.5;
+
+    // Scale offer between 72% (at 80% winning) and 94% (at 100% completely winning) of remaining 50% payout
+    const clampedProgress = Math.min(1, Math.max(0.8, overallWinProgress));
+    const payoutRatio = 0.72 + ((clampedProgress - 0.8) / 0.2) * (0.94 - 0.72);
+    const rawOffer = remainingMaxPayout * payoutRatio;
+    const minOffer = Math.min(remainingMaxPayout * 0.95, remainingStake * 1.05);
+    const finalOffer = Math.max(minOffer, Math.min(rawOffer, remainingMaxPayout * 0.95));
+
+    return Math.round(finalOffer * 100) / 100;
   }
 }
 

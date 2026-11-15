@@ -239,8 +239,8 @@ export const CheckBetsModal: React.FC<CheckBetsModalProps> = ({
                   </div>
                 </div>
 
-                {/* Live Cash Out Button */}
-                {bet.status === 'OPEN' && (
+                {/* Live Cash Out Button (only offered when winning >= 80% / complete win) */}
+                {bet.status === 'OPEN' && bet.cashoutAmount > 0 && (
                   <button
                     onClick={() => {
                       soundManager.playCashout();

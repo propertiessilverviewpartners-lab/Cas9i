@@ -253,27 +253,41 @@ export default function App() {
 
     const nextBets = placedBets.map(bet => {
       if (bet.status !== 'OPEN') return bet;
-      const settlement = virtualEngine.evaluateBetSettlement(bet);
+
+      let workingBet = bet;
+      if (!workingBet.liveHalfApplied && virtualEngine.hasBetGoneLive(workingBet)) {
+        const origStake = workingBet.originalStake ?? workingBet.stake;
+        const reducedStake = Math.round(origStake * 0.5 * 100) / 100;
+        changed = true;
+        workingBet = {
+          ...workingBet,
+          originalStake: origStake,
+          stake: reducedStake,
+          liveHalfApplied: true,
+        };
+      }
+
+      const settlement = virtualEngine.evaluateBetSettlement(workingBet);
       if (settlement === 'WON') {
         changed = true;
-        totalNewWinnings += bet.potentialPayout;
+        totalNewWinnings += workingBet.potentialPayout;
         wonTickets.push({
-          payout: bet.potentialPayout,
-          odds: bet.totalOdds,
-          label: bet.selections[0]?.matchTitle || 'Virtual Ticket'
+          payout: workingBet.potentialPayout,
+          odds: workingBet.totalOdds,
+          label: workingBet.selections[0]?.matchTitle || 'Virtual Ticket'
         });
-        return { ...bet, status: 'WON' as const, cashoutAmount: bet.potentialPayout };
+        return { ...workingBet, status: 'WON' as const, cashoutAmount: workingBet.potentialPayout };
       }
       if (settlement === 'LOST') {
         changed = true;
-        return { ...bet, status: 'LOST' as const, cashoutAmount: 0 };
+        return { ...workingBet, status: 'LOST' as const, cashoutAmount: 0 };
       }
-      const currentCashout = virtualEngine.calculateCashout(bet);
-      if (currentCashout !== bet.cashoutAmount) {
+      const currentCashout = virtualEngine.calculateCashout(workingBet);
+      if (currentCashout !== workingBet.cashoutAmount) {
         changed = true;
-        return { ...bet, cashoutAmount: currentCashout };
+        return { ...workingBet, cashoutAmount: currentCashout };
       }
-      return bet;
+      return workingBet;
     });
 
     if (changed) {
@@ -410,6 +424,9 @@ export default function App() {
   };
 
   const handleCashoutBet = (betId: string, amount: number) => {
+    if (amount <= 0) return;
+    const target = placedBets.find(b => b.id === betId && b.status === 'OPEN');
+    if (!target || target.cashoutAmount <= 0) return;
     setPlacedBets(prev =>
       prev.map(b => (b.id === betId ? { ...b, status: 'CASHED_OUT', cashoutAmount: amount } : b))
     );

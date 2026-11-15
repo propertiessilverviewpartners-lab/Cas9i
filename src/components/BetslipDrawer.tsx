@@ -113,10 +113,12 @@ export const BetslipDrawer: React.FC<BetslipDrawerProps> = ({
         type: betMode,
         selections: [...selections],
         stake: totalRequiredStake,
+        originalStake: totalRequiredStake,
+        liveHalfApplied: false,
         totalOdds: betMode === 'accumulator' ? totalAccumulatorOdds : Number((potentialReturn / (totalRequiredStake || 1)).toFixed(2)),
         potentialPayout: potentialReturn,
         status: 'OPEN',
-        cashoutAmount: Math.round(totalRequiredStake * 0.95 * 100) / 100
+        cashoutAmount: 0
       };
 
       onPlaceBet(placed);
