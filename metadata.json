@@ -1,0 +1,6 @@
+{
+  "name": "CAS9i - Virtual Sports & Casino",
+  "description": "Real-time virtual sports betting and live casino platform with instant odds syncing, live match simulations, interactive casino games, and live leaderboards.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,81 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --bg-dark: #03150b;
+    --brand-green: #00e700;
+    --brand-green-hover: #00ff00;
+    --brand-green-dark: #00ad3a;
+    --brand-gold: #ffbe0b;
+  }
+
+  body {
+    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background-color: #03150b;
+    color: #ffffff;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* Custom subtle scrollbars for odds and categories */
+  ::-webkit-scrollbar {
+    height: 4px;
+    width: 4px;
+  }
+  ::-webkit-scrollbar-track {
+    background: rgba(0, 0, 0, 0.2);
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(0, 231, 0, 0.25);
+    border-radius: 9999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(0, 231, 0, 0.5);
+  }
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Atmospheric Casino Emerald Glow */
+.casino-bg {
+  background: 
+    radial-gradient(ellipse 90% 45% at 50% 0%, rgba(0, 195, 60, 0.2) 0%, rgba(3, 21, 11, 0.95) 55%, #020c06 100%),
+    linear-gradient(180deg, #051d10 0%, #03140b 50%, #010804 100%);
+  background-attachment: fixed;
+}
+
+.glow-green-sm {
+  box-shadow: 0 0 10px rgba(0, 231, 0, 0.25);
+}
+
+.glow-green-md {
+  box-shadow: 0 0 16px rgba(0, 231, 0, 0.4);
+}
+
+.border-neon {
+  border-color: rgba(0, 231, 0, 0.35);
+}
+
+@keyframes flashUp {
+  0% { background-color: rgba(34, 197, 94, 0.8); }
+  100% { background-color: inherit; }
+}
+
+@keyframes flashDown {
+  0% { background-color: rgba(239, 68, 68, 0.8); }
+  100% { background-color: inherit; }
+}
+
+.flash-up {
+  animation: flashUp 0.8s ease-out;
+}
+
+.flash-down {
+  animation: flashDown 0.8s ease-out;
+}
