@@ -1,5 +1,5 @@
 import React from 'react';
-import { UserPlus, LogIn, LogOut, ShieldCheck, PlusCircle } from 'lucide-react';
+import { UserPlus, LogIn, LogOut, ShieldCheck } from 'lucide-react';
 import { UserProfile } from '../types';
 import { soundManager } from '../services/soundEffects';
 
@@ -7,7 +7,6 @@ interface HeaderProps {
   user: UserProfile;
   onOpenAuth: (mode: 'login' | 'register') => void;
   onLogout: () => void;
-  onOpenDeposit: () => void;
   onOpenAdminDashboard: () => void;
   onNavigateHome: () => void;
   isAdminViewActive: boolean;
@@ -17,7 +16,6 @@ export const Header: React.FC<HeaderProps> = ({
   user,
   onOpenAuth,
   onLogout,
-  onOpenDeposit,
   onOpenAdminDashboard,
   onNavigateHome,
   isAdminViewActive
@@ -40,9 +38,17 @@ export const Header: React.FC<HeaderProps> = ({
             </button>
           ) : (
             <div className="flex items-center gap-1.5">
-              <div className="flex items-center gap-1 text-zinc-200 font-bold text-xs py-1 px-1.5 rounded-lg bg-[#062416] border border-[#00e700]/25">
+              <div
+                className="flex items-center gap-1.5 text-zinc-200 font-bold text-xs py-1 px-2 rounded-lg bg-[#062416] border border-[#00e700]/25"
+                title={!user.isAdmin && user.id !== 'guest' ? `User ID: ${user.id}` : user.username}
+              >
                 <span className="text-xs">{user.avatar}</span>
                 <span className="hidden sm:inline max-w-[80px] truncate">{user.username}</span>
+                {!user.isAdmin && user.id && user.id !== 'guest' && (
+                  <span className="text-[10px] font-mono font-black text-[#00e700] tabular-nums">
+                    #{user.id}
+                  </span>
+                )}
               </div>
 
               {user.isAdmin && (
@@ -90,17 +96,11 @@ export const Header: React.FC<HeaderProps> = ({
         {/* Right Zone: Balance + Login / Logout Button */}
         <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
           {user.isLoggedIn && (
-            <button
-              onClick={() => {
-                soundManager.playClick();
-                onOpenDeposit();
-              }}
-              className="flex items-center gap-1 bg-[#062416] border border-[#00e700]/30 rounded-lg px-1.5 py-1 text-[11px] font-extrabold text-[#00e700] tabular-nums hover:border-[#00e700] whitespace-nowrap shrink-0"
-              title="Top-up Balance"
+            <div
+              className="flex items-center bg-[#062416] border border-[#00e700]/30 rounded-lg px-2 sm:px-2.5 py-1 text-[11px] sm:text-xs font-extrabold text-[#00e700] tabular-nums whitespace-nowrap shrink-0 select-none pointer-events-none"
             >
               <span>${user.balance.toFixed(0)}</span>
-              <PlusCircle className="w-3 h-3 text-amber-400" />
-            </button>
+            </div>
           )}
 
           {!user.isLoggedIn ? (

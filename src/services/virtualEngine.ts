@@ -1,4 +1,4 @@
-import { VirtualMatch, LeaderboardEntry, LiveBetTickerItem, PlacedBet, Club, League, TipsterBetcode, H2HRecord, BetSelection, FXAsset } from '../types';
+import { VirtualMatch, LeaderboardEntry, LiveBetTickerItem, PlacedBet, Club, League, TipsterBetcode, H2HRecord, BetSelection, FXAsset, RegisteredUser } from '../types';
 
 export const PRESET_FIXTURES_INFO = {
   featuredTitle: 'CDA Navalcarnero vs Real Betis',
@@ -25,6 +25,9 @@ class VirtualEngineService {
   private leaderboardSubscribers: Array<(leaderboard: LeaderboardEntry[]) => void> = [];
   private tickerSubscribers: Array<(ticker: LiveBetTickerItem[]) => void> = [];
   private goalAlertSubscribers: Array<(alert: { match: VirtualMatch; text: string }) => void> = [];
+  private usersChangedSubscribers: Array<() => void> = [];
+  private userUpdatedSubscribers: Array<(user: RegisteredUser) => void> = [];
+  private userDeletedSubscribers: Array<(userId: string) => void> = [];
 
   private ws: WebSocket | null = null;
   private reconnectAttempts = 0;
@@ -100,7 +103,13 @@ class VirtualEngineService {
     }
   }
 
-  public async login(email: string, password: string): Promise<{ ok: boolean; isAdmin?: boolean; error?: string }> {
+  public async login(email: string, password: string): Promise<{
+    ok: boolean;
+    isAdmin?: boolean;
+    user?: RegisteredUser;
+    needsVerification?: boolean;
+    error?: string;
+  }> {
     const res = await fetch('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -108,14 +117,81 @@ class VirtualEngineService {
     });
     const data = await res.json();
     if (!res.ok || !data.ok) {
-      return { ok: false, error: data.error || 'Authentication failed.' };
+      return {
+        ok: false,
+        needsVerification: Boolean(data.needsVerification),
+        error: data.error || 'Authentication failed.'
+      };
     }
     if (data.isAdmin && data.adminToken) {
       this.setAdminToken(data.adminToken);
     } else {
       this.setAdminToken(null);
     }
-    return { ok: true, isAdmin: Boolean(data.isAdmin) };
+    return {
+      ok: true,
+      isAdmin: Boolean(data.isAdmin),
+      user: data.user as RegisteredUser | undefined
+    };
+  }
+
+  public async registerUser(params: {
+    username: string;
+    fullName: string;
+    email: string;
+    password: string;
+    avatar: string;
+  }): Promise<{ ok: boolean; pendingUserId?: string; verificationCode?: string; email?: string; error?: string }> {
+    const res = await fetch('/api/auth/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params)
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      return { ok: false, error: data.error || 'Registration failed.' };
+    }
+    return {
+      ok: true,
+      pendingUserId: data.pendingUserId,
+      verificationCode: data.verificationCode,
+      email: data.email
+    };
+  }
+
+  public async verifyRegistration(email: string, code: string): Promise<{ ok: boolean; user?: RegisteredUser; error?: string }> {
+    const res = await fetch('/api/auth/register/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, code })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      return { ok: false, error: data.error || 'Verification failed.' };
+    }
+    return { ok: true, user: data.user as RegisteredUser };
+  }
+
+  public async fetchUserSession(userId: string): Promise<RegisteredUser | null> {
+    try {
+      const res = await fetch(`/api/auth/session/${encodeURIComponent(userId)}`, { cache: 'no-store' });
+      if (!res.ok) return null;
+      const data = await res.json();
+      return data.ok ? (data.user as RegisteredUser) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  public syncUserBalanceDelta(userId: string, delta: number) {
+    if (!userId || userId === 'guest' || userId === 'admin-cas9i' || !Number.isFinite(delta) || delta === 0) return;
+    void fetch(`/api/auth/session/${encodeURIComponent(userId)}/balance`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ delta })
+    }).catch(() => {
+      // ignore transient network errors
+    });
   }
 
   private async fetchInitialState() {
@@ -292,6 +368,19 @@ class VirtualEngineService {
                 this.goalAlertSubscribers.forEach(cb => cb(msg.data));
               }
               break;
+            case 'event:users-changed':
+              this.usersChangedSubscribers.forEach(cb => cb());
+              break;
+            case 'event:user-updated':
+              if (msg.data?.id) {
+                this.userUpdatedSubscribers.forEach(cb => cb(msg.data as RegisteredUser));
+              }
+              break;
+            case 'event:user-deleted':
+              if (msg.data?.userId) {
+                this.userDeletedSubscribers.forEach(cb => cb(String(msg.data.userId)));
+              }
+              break;
             default:
               break;
           }
@@ -453,6 +542,97 @@ class VirtualEngineService {
     this.goalAlertSubscribers.push(callback);
     return () => {
       this.goalAlertSubscribers = this.goalAlertSubscribers.filter(cb => cb !== callback);
+    };
+  }
+
+  public onUsersChanged(callback: () => void): () => void {
+    this.usersChangedSubscribers.push(callback);
+    return () => {
+      this.usersChangedSubscribers = this.usersChangedSubscribers.filter(cb => cb !== callback);
+    };
+  }
+
+  public onUserUpdated(callback: (user: RegisteredUser) => void): () => void {
+    this.userUpdatedSubscribers.push(callback);
+    return () => {
+      this.userUpdatedSubscribers = this.userUpdatedSubscribers.filter(cb => cb !== callback);
+    };
+  }
+
+  public onUserDeleted(callback: (userId: string) => void): () => void {
+    this.userDeletedSubscribers.push(callback);
+    return () => {
+      this.userDeletedSubscribers = this.userDeletedSubscribers.filter(cb => cb !== callback);
+    };
+  }
+
+  public async fetchAdminUsers(): Promise<RegisteredUser[]> {
+    const res = await fetch('/api/admin/users', {
+      headers: this.getAdminHeaders(),
+      cache: 'no-store'
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || 'Failed to load users.');
+    }
+    return (data.users || []) as RegisteredUser[];
+  }
+
+  public async lookupAdminUserById(userId: string): Promise<RegisteredUser> {
+    const cleanId = userId.trim().replace(/^#/, '');
+    const res = await fetch(`/api/admin/users/lookup?id=${encodeURIComponent(cleanId)}`, {
+      headers: this.getAdminHeaders(),
+      cache: 'no-store'
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok || !data.user) {
+      throw new Error(data.error || 'error');
+    }
+    return data.user as RegisteredUser;
+  }
+
+  public async updateAdminUser(userId: string, updates: Partial<RegisteredUser>): Promise<{ user: RegisteredUser; users: RegisteredUser[] }> {
+    const res = await fetch(`/api/admin/users/${encodeURIComponent(userId)}`, {
+      method: 'PUT',
+      headers: this.getAdminHeaders(),
+      body: JSON.stringify(updates)
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || 'Failed to update user.');
+    }
+    return {
+      user: data.user as RegisteredUser,
+      users: (data.users || []) as RegisteredUser[],
+    };
+  }
+
+  public async deleteAdminUser(userId: string): Promise<RegisteredUser[]> {
+    const res = await fetch(`/api/admin/users/${encodeURIComponent(userId)}`, {
+      method: 'DELETE',
+      headers: this.getAdminHeaders()
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || 'Failed to delete user.');
+    }
+    return (data.users || []) as RegisteredUser[];
+  }
+
+  public async depositToUser(userId: string, amount: number): Promise<{ user: RegisteredUser; users: RegisteredUser[]; depositedAmount: number }> {
+    const res = await fetch(`/api/admin/users/${encodeURIComponent(userId)}/deposit`, {
+      method: 'POST',
+      headers: this.getAdminHeaders(),
+      body: JSON.stringify({ amount })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || 'error');
+    }
+    return {
+      user: data.user as RegisteredUser,
+      users: (data.users || []) as RegisteredUser[],
+      depositedAmount: Number(data.depositedAmount) || amount,
     };
   }
 
@@ -716,6 +896,19 @@ class VirtualEngineService {
     return false;
   }
 
+  private findSelectionH2HResult(sel: BetSelection, betTimestamp: number): H2HRecord | undefined {
+    if (typeof sel.roundNumber === 'number') {
+      const byRound = this.h2hRecords.find(
+        r => r.matchId === sel.matchId && r.roundNumber === sel.roundNumber
+      );
+      if (byRound) return byRound;
+    }
+    const matchingRecords = this.h2hRecords
+      .filter(r => r.matchId === sel.matchId && r.playedAt >= betTimestamp - 15000)
+      .sort((a, b) => a.playedAt - b.playedAt);
+    return matchingRecords[0];
+  }
+
   public evaluateBetSettlement(bet: PlacedBet): 'OPEN' | 'WON' | 'LOST' {
     if (bet.status !== 'OPEN') {
       return bet.status === 'WON' ? 'WON' : 'LOST';
@@ -723,11 +916,7 @@ class VirtualEngineService {
 
     let allResolved = true;
     for (const sel of bet.selections) {
-      const matchingRecords = this.h2hRecords
-        .filter(r => r.matchId === sel.matchId && r.playedAt >= bet.timestamp)
-        .sort((a, b) => a.playedAt - b.playedAt);
-
-      const roundResult = matchingRecords[0];
+      const roundResult = this.findSelectionH2HResult(sel, bet.timestamp);
       if (!roundResult) {
         const finishedMatch = this.matches.find(m => m.id === sel.matchId && m.status === 'FINISHED');
         if (!finishedMatch) {
@@ -755,10 +944,9 @@ class VirtualEngineService {
 
   public hasBetGoneLive(bet: PlacedBet): boolean {
     for (const sel of bet.selections) {
-      const hasFinishedRound = this.h2hRecords.some(
-        r => r.matchId === sel.matchId && r.playedAt >= bet.timestamp
-      );
-      if (hasFinishedRound) return true;
+      if (this.findSelectionH2HResult(sel, bet.timestamp)) {
+        return true;
+      }
 
       const match = this.matches.find(m => m.id === sel.matchId);
       if (match && (match.status === 'LIVE' || match.status === 'FINISHED')) {
@@ -947,11 +1135,7 @@ class VirtualEngineService {
     let anyStartedOrFinished = false;
 
     for (const sel of bet.selections) {
-      const matchingRecords = this.h2hRecords
-        .filter(r => r.matchId === sel.matchId && r.playedAt >= bet.timestamp)
-        .sort((a, b) => a.playedAt - b.playedAt);
-
-      const roundResult = matchingRecords[0];
+      const roundResult = this.findSelectionH2HResult(sel, bet.timestamp);
       if (roundResult) {
         anyStartedOrFinished = true;
         const won = this.evaluateSelectionAgainstResult(sel, roundResult);

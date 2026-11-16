@@ -77,17 +77,6 @@ export const CasinoView: React.FC<CasinoViewProps> = ({
             </div>
           </div>
         );
-      case 'strike-777':
-        return (
-          <div className="absolute inset-0 bg-gradient-to-br from-amber-900 via-red-950 to-yellow-950 flex flex-col items-center justify-center p-2 text-center">
-            <span className="text-3xl font-black text-amber-400 drop-shadow-[0_0_12px_rgba(245,158,11,0.8)]">
-              777
-            </span>
-            <span className="text-xs font-black text-white uppercase tracking-wider">
-              STRIKE
-            </span>
-          </div>
-        );
       case 'jetx':
         return (
           <div className="absolute inset-0 bg-gradient-to-br from-indigo-950 via-purple-950 to-blue-950 flex flex-col items-center justify-center p-2 text-center">
@@ -98,21 +87,11 @@ export const CasinoView: React.FC<CasinoViewProps> = ({
           </div>
         );
       case 'hit-slot-2025':
-      case 'burning-classics':
         return (
           <div className="absolute inset-0 bg-gradient-to-br from-rose-950 via-amber-950 to-zinc-950 flex flex-col items-center justify-center p-2 text-center">
             <span className="text-2xl sm:text-3xl filter drop-shadow">🔥 7 🍒</span>
             <span className="text-xs sm:text-sm font-black text-amber-400 mt-1 uppercase tracking-wider">
               {game.title}
-            </span>
-          </div>
-        );
-      case 'ice-fishing':
-        return (
-          <div className="absolute inset-0 bg-gradient-to-br from-sky-950 via-blue-900 to-indigo-950 flex flex-col items-center justify-center p-2 text-center">
-            <span className="text-3xl sm:text-4xl filter drop-shadow">🎣</span>
-            <span className="text-xs sm:text-sm font-black text-sky-300 mt-1 uppercase tracking-wider">
-              ICE FISHING
             </span>
           </div>
         );
@@ -123,15 +102,6 @@ export const CasinoView: React.FC<CasinoViewProps> = ({
             <span className="text-3xl sm:text-4xl filter drop-shadow">🛩️</span>
             <span className="text-xs sm:text-sm font-black text-red-500 mt-1 uppercase tracking-widest drop-shadow-[0_0_10px_rgba(239,68,68,0.8)]">
               {game.title}
-            </span>
-          </div>
-        );
-      case 'duck-hunters':
-        return (
-          <div className="absolute inset-0 bg-gradient-to-br from-emerald-950 via-amber-950 to-zinc-950 flex flex-col items-center justify-center p-2 text-center">
-            <span className="text-3xl sm:text-4xl filter drop-shadow">🦆</span>
-            <span className="text-xs sm:text-sm font-black text-emerald-400 mt-1 uppercase tracking-wider">
-              DUCK HUNTERS
             </span>
           </div>
         );

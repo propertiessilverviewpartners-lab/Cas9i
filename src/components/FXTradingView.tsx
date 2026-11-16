@@ -98,7 +98,7 @@ export const FXTradingView: React.FC<FXTradingViewProps> = ({
             { id: 'forex', label: `Forex (${forexCount})` },
             { id: 'bonds', label: `Bonds (${bondsCount})` },
             { id: 'shares', label: `Shares (${sharesCount})` },
-            { id: 'positions', label: `Trades (${positions.length})` },
+            { id: 'positions', label: `FX (${openPositions.length})` },
           ].map(tab => {
             const active = filterCat === tab.id;
             return (
@@ -138,15 +138,15 @@ export const FXTradingView: React.FC<FXTradingViewProps> = ({
       {filterCat === 'positions' ? (
         <div className="space-y-2">
           <div className="flex items-center justify-between text-[10px] text-zinc-400 font-bold px-0.5">
-            <span>Active &amp; Settled FX Predictions ({positions.length})</span>
-            <span className="text-[#00e700]">Won: {wonPositions.length}</span>
+            <span>Live FX Predictions ({openPositions.length})</span>
+            <span className="text-[#00e700]">Settled Won: {wonPositions.length}</span>
           </div>
 
-          {positions.length === 0 ? (
+          {openPositions.length === 0 ? (
             <div className="bg-[#051c10]/80 border border-zinc-800 rounded-xl p-6 text-center space-y-2">
-              <p className="text-xs font-bold text-white">No FX predictions staked yet</p>
+              <p className="text-xs font-bold text-white">No live FX predictions right now</p>
               <p className="text-[10px] text-zinc-400">
-                Choose any Forex pair, Bond, or Share to predict Rise or Fall on 10m, 15m, 20m, or 1hr.
+                Active FX predictions appear here until settled, then move to Check Bets → Settled.
               </p>
               <button
                 onClick={() => setFilterCat('all')}
@@ -157,15 +157,13 @@ export const FXTradingView: React.FC<FXTradingViewProps> = ({
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-              {positions.map(pos => {
+              {openPositions.map(pos => {
                 const liveAsset = assets.find(a => a.id === pos.assetId);
                 const livePrice = liveAsset?.price ?? pos.entryPrice;
                 const priceMeta = liveAsset || { decimals: 2, unitPrefix: '$', unitSuffix: '' };
                 const leading =
-                  pos.status === 'OPEN'
-                    ? (pos.direction === 'RISE' && livePrice > pos.entryPrice) ||
-                      (pos.direction === 'FALL' && livePrice < pos.entryPrice)
-                    : pos.status === 'WON';
+                  (pos.direction === 'RISE' && livePrice > pos.entryPrice) ||
+                  (pos.direction === 'FALL' && livePrice < pos.entryPrice);
 
                 return (
                   <div
@@ -185,28 +183,18 @@ export const FXTradingView: React.FC<FXTradingViewProps> = ({
                         </span>
                       </div>
 
-                      {pos.status === 'OPEN' ? (
-                        <span className="text-[10px] font-mono font-bold text-amber-300 flex items-center gap-1 shrink-0">
-                          <Clock className="w-3 h-3" />
-                          {formatRemaining(pos.expiresAt)}
-                        </span>
-                      ) : (
-                        <span
-                          className={`text-[10px] font-black uppercase shrink-0 ${
-                            pos.status === 'WON' ? 'text-[#00e700]' : 'text-red-400'
-                          }`}
-                        >
-                          {pos.status}
-                        </span>
-                      )}
+                      <span className="text-[10px] font-mono font-bold text-amber-300 flex items-center gap-1 shrink-0 tabular-nums">
+                        <Clock className="w-3 h-3" />
+                        {formatRemaining(pos.expiresAt)}
+                      </span>
                     </div>
 
                     <div className="flex items-center justify-between text-[10px] text-zinc-400 font-mono tabular-nums">
                       <span>Entry: {formatAssetPrice(pos.entryPrice, priceMeta)}</span>
                       <span>
-                        {pos.status === 'OPEN' ? 'Live' : 'Close'}:{' '}
+                        Live:{' '}
                         <span className={leading ? 'text-[#00e700] font-bold' : 'text-red-400 font-bold'}>
-                          {formatAssetPrice(pos.settlementPrice ?? livePrice, priceMeta)}
+                          {formatAssetPrice(livePrice, priceMeta)}
                         </span>
                       </span>
                     </div>

@@ -128,6 +128,7 @@ export interface BetSelection {
   odds: number;
   initialOdds: number;
   isZoom?: boolean;
+  roundNumber?: number;
 }
 
 export interface TipsterBetcode {
@@ -151,6 +152,7 @@ export interface PlacedBet {
   potentialPayout: number;
   status: 'OPEN' | 'WON' | 'LOST' | 'CASHED_OUT';
   cashoutAmount: number;
+  settledAt?: number;
 }
 
 export interface CasinoGame {
@@ -219,6 +221,10 @@ export interface UserProfile {
   id: string;
   email: string;
   username: string;
+  fullName?: string;
+  phone?: string;
+  country?: string;
+  verified?: boolean;
   balance: number;
   currency: string;
   avatar: string;
@@ -226,6 +232,27 @@ export interface UserProfile {
   isAdmin: boolean;
   totalBetsPlaced: number;
   totalWon: number;
+}
+
+export interface RegisteredUser {
+  id: string;
+  username: string;
+  fullName: string;
+  email: string;
+  avatar: string;
+  balance: number;
+  verified: boolean;
+  createdAt: number;
+  phone?: string;
+  country?: string;
+  city?: string;
+  address?: string;
+  dateOfBirth?: string;
+  kycIdNumber?: string;
+  accountTier?: 'Standard' | 'VIP' | 'Suspended';
+  notes?: string;
+  lastDepositAt?: number;
+  lastDepositAmount?: number;
 }
 
 export type FXCategory = 'forex' | 'bonds' | 'shares';
@@ -280,5 +307,6 @@ export interface FXPosition {
   potentialPayout: number;
   createdAt: number;
   expiresAt: number;
+  settledAt?: number;
   status: 'OPEN' | 'WON' | 'LOST';
 }

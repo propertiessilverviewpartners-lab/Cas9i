@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { PlacedBet, FXPosition, FXAsset } from '../types';
-import { X, DollarSign, Clock } from 'lucide-react';
+import { X, DollarSign, Clock, RotateCcw } from 'lucide-react';
 import { soundManager } from '../services/soundEffects';
 import { formatAssetPrice } from './FXBookmakerModal';
 
@@ -11,7 +11,12 @@ interface CheckBetsModalProps {
   fxPositions?: FXPosition[];
   fxAssets?: FXAsset[];
   onCashoutBet: (betId: string, amount: number) => void;
+  onResetBets?: () => void;
 }
+
+type SettledEntry =
+  | { kind: 'SOCCER'; sortTime: number; bet: PlacedBet }
+  | { kind: 'FX'; sortTime: number; pos: FXPosition };
 
 export const CheckBetsModal: React.FC<CheckBetsModalProps> = ({
   isOpen,
@@ -19,10 +24,18 @@ export const CheckBetsModal: React.FC<CheckBetsModalProps> = ({
   bets,
   fxPositions = [],
   fxAssets = [],
-  onCashoutBet
+  onCashoutBet,
+  onResetBets
 }) => {
   const [activeTab, setActiveTab] = useState<'OPEN' | 'SETTLED' | 'FX'>('OPEN');
   const [nowTick, setNowTick] = useState<number>(Date.now());
+  const [confirmReset, setConfirmReset] = useState(false);
+
+  useEffect(() => {
+    if (!isOpen) {
+      setConfirmReset(false);
+    }
+  }, [isOpen]);
 
   useEffect(() => {
     if (!isOpen || !fxPositions.some(p => p.status === 'OPEN')) return;
@@ -33,7 +46,23 @@ export const CheckBetsModal: React.FC<CheckBetsModalProps> = ({
   if (!isOpen) return null;
 
   const openBets = bets.filter(b => b.status === 'OPEN');
+  const openFxPositions = fxPositions.filter(p => p.status === 'OPEN');
+
   const settledBets = bets.filter(b => b.status !== 'OPEN');
+  const settledFxPositions = fxPositions.filter(p => p.status !== 'OPEN');
+
+  const settledItems: SettledEntry[] = [
+    ...settledBets.map(bet => ({
+      kind: 'SOCCER' as const,
+      sortTime: bet.settledAt ?? bet.timestamp,
+      bet
+    })),
+    ...settledFxPositions.map(pos => ({
+      kind: 'FX' as const,
+      sortTime: pos.settledAt ?? pos.expiresAt ?? pos.createdAt,
+      pos
+    }))
+  ].sort((a, b) => b.sortTime - a.sortTime);
 
   const formatRemaining = (expiresAt: number) => {
     const remSec = Math.max(0, Math.floor((expiresAt - nowTick) / 1000));
@@ -55,19 +84,56 @@ export const CheckBetsModal: React.FC<CheckBetsModalProps> = ({
               <h3 className="text-sm sm:text-base font-black text-white tracking-wide">
                 MY BETS &amp; CASHOUT
               </h3>
-              <span className="text-[10px] text-zinc-400">Track live tickets, FX trades, and early payouts</span>
+              <span className="text-[10px] text-zinc-400">Track live tickets, FX trades, and settled results</span>
             </div>
           </div>
 
-          <button
-            onClick={onClose}
-            className="p-1.5 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-white"
-          >
-            <X className="w-5 h-5" />
-          </button>
+          <div className="flex items-center gap-1.5 shrink-0">
+            {onResetBets && (bets.length > 0 || fxPositions.length > 0) && (
+              confirmReset ? (
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => setConfirmReset(false)}
+                    className="px-2 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[10px] font-bold whitespace-nowrap"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => {
+                      soundManager.playClick();
+                      onResetBets();
+                      setConfirmReset(false);
+                    }}
+                    className="px-2 py-1 rounded-lg bg-red-600 hover:bg-red-500 text-white text-[10px] font-black whitespace-nowrap"
+                  >
+                    Confirm Reset
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => {
+                    soundManager.playClick();
+                    setConfirmReset(true);
+                  }}
+                  title="Reset Check Bets"
+                  className="px-2 py-1.5 rounded-lg bg-zinc-800/80 hover:bg-red-950/60 border border-zinc-700 hover:border-red-500/40 text-zinc-300 hover:text-red-300 text-[10px] font-bold flex items-center gap-1 whitespace-nowrap"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  <span>Reset</span>
+                </button>
+              )
+            )}
+
+            <button
+              onClick={onClose}
+              className="p-1.5 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-white"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
         </div>
 
-        {/* Tab Switcher: Open vs Settled vs FX */}
+        {/* Tab Switcher: Live (Soccer) vs Settled (Soccer + FX) vs FX Trades (Open FX) */}
         <div className="p-2 bg-[#020e06] border-b border-zinc-800 grid grid-cols-3 gap-1.5">
           <button
             onClick={() => {
@@ -93,7 +159,7 @@ export const CheckBetsModal: React.FC<CheckBetsModalProps> = ({
                 : 'text-zinc-400 hover:text-white'
             }`}
           >
-            Settled ({settledBets.length})
+            Settled ({settledItems.length})
           </button>
           <button
             onClick={() => {
@@ -106,31 +172,29 @@ export const CheckBetsModal: React.FC<CheckBetsModalProps> = ({
                 : 'text-zinc-400 hover:text-white'
             }`}
           >
-            FX Trades ({fxPositions.length})
+            FX ({openFxPositions.length})
           </button>
         </div>
 
         {/* Bets List */}
         <div className="flex-1 overflow-y-auto p-3 space-y-3">
           {activeTab === 'FX' ? (
-            fxPositions.length === 0 ? (
+            openFxPositions.length === 0 ? (
               <div className="py-12 text-center text-zinc-400 text-xs">
                 <p className="text-3xl mb-2">📈</p>
-                <p className="font-bold text-white">No FX predictions staked yet</p>
+                <p className="font-bold text-white">No live FX predictions</p>
                 <p className="text-[11px] text-zinc-500 mt-1">
-                  Open the FX tab to predict Rise or Fall on Forex, Bonds, and Shares.
+                  Open FX predictions appear here until settled, then move to Settled.
                 </p>
               </div>
             ) : (
-              fxPositions.map(pos => {
+              openFxPositions.map(pos => {
                 const liveAsset = fxAssets.find(a => a.id === pos.assetId);
                 const livePrice = liveAsset?.price ?? pos.entryPrice;
                 const priceMeta = liveAsset || { decimals: 2, unitPrefix: '$', unitSuffix: '' };
                 const leading =
-                  pos.status === 'OPEN'
-                    ? (pos.direction === 'RISE' && livePrice > pos.entryPrice) ||
-                      (pos.direction === 'FALL' && livePrice < pos.entryPrice)
-                    : pos.status === 'WON';
+                  (pos.direction === 'RISE' && livePrice > pos.entryPrice) ||
+                  (pos.direction === 'FALL' && livePrice < pos.entryPrice);
 
                 return (
                   <div
@@ -145,22 +209,16 @@ export const CheckBetsModal: React.FC<CheckBetsModalProps> = ({
                         </span>
                       </div>
 
-                      {pos.status === 'OPEN' ? (
-                        <span className="font-mono text-[10px] font-bold text-amber-300 flex items-center gap-1">
-                          <Clock className="w-3 h-3" />
-                          {formatRemaining(pos.expiresAt)}
-                        </span>
-                      ) : (
-                        <span className={`text-[10px] font-black uppercase ${pos.status === 'WON' ? 'text-[#00e700]' : 'text-red-400'}`}>
-                          {pos.status}
-                        </span>
-                      )}
+                      <span className="font-mono text-[10px] font-bold text-amber-300 flex items-center gap-1 tabular-nums">
+                        <Clock className="w-3 h-3" />
+                        {formatRemaining(pos.expiresAt)}
+                      </span>
                     </div>
 
                     <div className="flex items-center justify-between bg-[#03150b] px-2.5 py-2 rounded-lg border border-zinc-800 text-[11px] font-mono tabular-nums">
                       <span className="text-zinc-400">Entry: {formatAssetPrice(pos.entryPrice, priceMeta)}</span>
                       <span className={leading ? 'text-[#00e700] font-bold' : 'text-red-400 font-bold'}>
-                        {pos.status === 'OPEN' ? 'Live' : 'Close'}: {formatAssetPrice(pos.settlementPrice ?? livePrice, priceMeta)}
+                        Live: {formatAssetPrice(livePrice, priceMeta)}
                       </span>
                     </div>
 
@@ -176,16 +234,146 @@ export const CheckBetsModal: React.FC<CheckBetsModalProps> = ({
                 );
               })
             )
-          ) : (activeTab === 'OPEN' ? openBets : settledBets).length === 0 ? (
+          ) : activeTab === 'SETTLED' ? (
+            settledItems.length === 0 ? (
+              <div className="py-12 text-center text-zinc-400 text-xs">
+                <p className="text-3xl mb-2">🎫</p>
+                <p className="font-bold text-white">No settled bets found</p>
+                <p className="text-[11px] text-zinc-500 mt-1">
+                  Completed soccer bets and FX predictions appear here once settled.
+                </p>
+              </div>
+            ) : (
+              settledItems.map(item => {
+                if (item.kind === 'FX') {
+                  const pos = item.pos;
+                  const liveAsset = fxAssets.find(a => a.id === pos.assetId);
+                  const priceMeta = liveAsset || { decimals: 2, unitPrefix: '$', unitSuffix: '' };
+                  const isWin = pos.status === 'WON';
+                  const credited = isWin ? pos.potentialPayout : 0;
+
+                  return (
+                    <div
+                      key={pos.id}
+                      className="bg-[#062416] border border-[#00e700]/25 rounded-xl p-3 space-y-2 shadow-md"
+                    >
+                      <div className="flex items-center justify-between text-[11px]">
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[10px] bg-zinc-800 text-[#00e700] px-1.5 py-0.5 rounded font-black uppercase">
+                            FX
+                          </span>
+                          <span className="font-black text-white">{pos.symbol}</span>
+                          <span className={`font-black ${pos.direction === 'RISE' ? 'text-[#00e700]' : 'text-red-400'}`}>
+                            {pos.direction} · {pos.duration}
+                          </span>
+                        </div>
+
+                        <span
+                          className={`text-[10px] font-black uppercase px-2 py-0.5 rounded-full ${
+                            isWin
+                              ? 'bg-amber-900/60 text-amber-400 border border-amber-500/40'
+                              : 'bg-red-900/60 text-red-400 border border-red-500/40'
+                          }`}
+                        >
+                          {pos.status}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center justify-between bg-[#03150b] px-2.5 py-2 rounded-lg border border-zinc-800 text-[11px] font-mono tabular-nums">
+                        <span className="text-zinc-400">Entry: {formatAssetPrice(pos.entryPrice, priceMeta)}</span>
+                        <span className={isWin ? 'text-[#00e700] font-bold' : 'text-red-400 font-bold'}>
+                          Close: {formatAssetPrice(pos.settlementPrice ?? pos.entryPrice, priceMeta)}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center justify-between text-xs pt-1 border-t border-zinc-800">
+                        <div className="text-zinc-400">
+                          Stake: <span className="font-bold text-white tabular-nums">${pos.stake.toLocaleString()}</span>
+                        </div>
+                        <div className="text-zinc-400">
+                          {isWin ? 'Credited: ' : 'Payout: '}
+                          <span className={`font-bold tabular-nums ${isWin ? 'text-[#00e700]' : 'text-zinc-500'}`}>
+                            ${credited.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                }
+
+                const bet = item.bet;
+                const credited =
+                  bet.status === 'WON'
+                    ? bet.potentialPayout
+                    : bet.status === 'CASHED_OUT'
+                    ? bet.cashoutAmount
+                    : 0;
+
+                return (
+                  <div
+                    key={bet.id}
+                    className="bg-[#062416] border border-[#00e700]/25 rounded-xl p-3 space-y-2.5 shadow-md"
+                  >
+                    <div className="flex items-center justify-between text-[11px]">
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-mono text-zinc-400 font-bold">
+                          #{bet.id.slice(-6).toUpperCase()}
+                        </span>
+                        <span className="text-[10px] bg-zinc-800 text-zinc-300 px-1.5 py-0.5 rounded font-black uppercase">
+                          {bet.type}
+                        </span>
+                      </div>
+
+                      <span className={`text-[10px] font-black uppercase px-2 py-0.5 rounded-full ${
+                        bet.status === 'WON'
+                          ? 'bg-amber-900/60 text-amber-400 border border-amber-500/40'
+                          : bet.status === 'CASHED_OUT'
+                          ? 'bg-blue-900/60 text-blue-400 border border-blue-500/40'
+                          : 'bg-red-900/60 text-red-400 border border-red-500/40'
+                      }`}>
+                        {bet.status}
+                      </span>
+                    </div>
+
+                    <div className="space-y-1 bg-[#03150b] p-2 rounded-lg border border-zinc-800">
+                      {bet.selections.map((sel, i) => (
+                        <div key={i} className="flex items-center justify-between text-xs">
+                          <div className="truncate pr-2">
+                            <span className="text-zinc-400 text-[10px] block truncate">{sel.matchTitle}</span>
+                            <span className="font-bold text-white">{sel.marketType}: {sel.selection}</span>
+                          </div>
+                          <span className="font-mono font-bold text-[#00e700] tabular-nums">
+                            @{sel.odds.toFixed(2)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="flex items-center justify-between text-xs pt-1 border-t border-zinc-800">
+                      <div className="text-zinc-400">
+                        Stake: <span className="font-bold text-white tabular-nums">${(bet.originalStake ?? bet.stake).toFixed(2)}</span>
+                      </div>
+                      <div className="text-zinc-400">
+                        {bet.status === 'LOST' ? 'Payout: ' : 'Credited: '}
+                        <span className={`font-bold tabular-nums ${bet.status === 'LOST' ? 'text-zinc-500' : 'text-[#00e700]'}`}>
+                          ${credited.toFixed(2)}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })
+            )
+          ) : openBets.length === 0 ? (
             <div className="py-12 text-center text-zinc-400 text-xs">
               <p className="text-3xl mb-2">🎫</p>
-              <p className="font-bold text-white">No {activeTab.toLowerCase()} bets found</p>
+              <p className="font-bold text-white">No live bets found</p>
               <p className="text-[11px] text-zinc-500 mt-1">
-                {activeTab === 'OPEN' ? 'Place bets on sports or virtuals to see them here.' : 'Completed bets will appear in settled history.'}
+                Place bets on sports or virtuals to track them live here.
               </p>
             </div>
           ) : (
-            (activeTab === 'OPEN' ? openBets : settledBets).map(bet => (
+            openBets.map(bet => (
               <div
                 key={bet.id}
                 className="bg-[#062416] border border-[#00e700]/25 rounded-xl p-3 space-y-2.5 shadow-md"
@@ -201,15 +389,7 @@ export const CheckBetsModal: React.FC<CheckBetsModalProps> = ({
                     </span>
                   </div>
 
-                  <span className={`text-[10px] font-black uppercase px-2 py-0.5 rounded-full ${
-                    bet.status === 'OPEN'
-                      ? 'bg-emerald-900/60 text-[#00e700] border border-emerald-500/40'
-                      : bet.status === 'WON'
-                      ? 'bg-amber-900/60 text-amber-400 border border-amber-500/40'
-                      : bet.status === 'CASHED_OUT'
-                      ? 'bg-blue-900/60 text-blue-400 border border-blue-500/40'
-                      : 'bg-red-900/60 text-red-400 border border-red-500/40'
-                  }`}>
+                  <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded-full bg-emerald-900/60 text-[#00e700] border border-emerald-500/40">
                     {bet.status}
                   </span>
                 </div>

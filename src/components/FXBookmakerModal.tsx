@@ -70,7 +70,7 @@ export const FXBookmakerModal: React.FC<FXBookmakerModalProps> = ({
 
   const assetPositions = useMemo(() => {
     if (!asset) return [];
-    return positions.filter(p => p.assetId === asset.id).slice(0, 6);
+    return positions.filter(p => p.assetId === asset.id && p.status === 'OPEN').slice(0, 6);
   }, [positions, asset]);
 
   if (!asset) return null;

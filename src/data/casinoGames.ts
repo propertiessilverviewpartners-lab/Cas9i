@@ -80,19 +80,6 @@ export const CASINO_GAMES: CasinoGame[] = [
     description: 'Rapid 49-ball lotto draw every 60 seconds with instant combination payouts.'
   },
   {
-    id: 'strike-777',
-    title: '777 Strike',
-    category: 'slots',
-    badge: 'JACKPOT',
-    multiplierMax: '2,830x',
-    rtp: '96.0%',
-    popularity: 95,
-    bgGradient: 'from-amber-400/25 to-red-950/40',
-    accentColor: '#f59e0b',
-    iconType: 'slot',
-    description: 'Vegas style 5-reel gold jackpot slot featuring cascading crowns, wild 7s, and free spin bonus.'
-  },
-  {
     id: 'jetx',
     title: 'JetX',
     category: 'crash',
@@ -118,44 +105,6 @@ export const CASINO_GAMES: CasinoGame[] = [
     description: 'Flaming cherries, lucky watermelons, and golden bells with neon scatter multipliers.'
   },
   {
-    id: 'ice-fishing',
-    title: 'Ice Fishing',
-    category: 'instant',
-    badge: '5000x',
-    multiplierMax: '5,000x',
-    rtp: '96.4%',
-    popularity: 89,
-    bgGradient: 'from-sky-400/25 to-blue-950/40',
-    accentColor: '#38bdf8',
-    iconType: 'fish',
-    description: 'Arctic adventure bonus wheel with frozen wild prizes and deep dive catches.'
-  },
-  {
-    id: 'gidi-slot',
-    title: 'Gidi Slot',
-    category: 'slots',
-    badge: 'NEW',
-    multiplierMax: '3,200x',
-    rtp: '96.6%',
-    popularity: 90,
-    bgGradient: 'from-emerald-400/25 to-purple-950/40',
-    accentColor: '#10b981',
-    iconType: 'music',
-    description: 'Lagos nightlife vibed slot with vibrant afro-beats rhythm and expanding neon wilds.'
-  },
-  {
-    id: 'burning-coins-40',
-    title: 'Burning Coins 40',
-    category: 'slots',
-    multiplierMax: '4,000x',
-    rtp: '96.1%',
-    popularity: 87,
-    bgGradient: 'from-rose-500/25 to-orange-950/40',
-    accentColor: '#f43f5e',
-    iconType: 'flame',
-    description: '40 paylines of sizzling gold coins and stacked fire reels.'
-  },
-  {
     id: 'high-flyer',
     title: 'High Flyer',
     category: 'crash',
@@ -169,18 +118,6 @@ export const CASINO_GAMES: CasinoGame[] = [
     description: 'Golden biplane altitude challenge with double chance payout triggers.'
   },
   {
-    id: 'burning-classics',
-    title: 'Burning Classics',
-    category: 'slots',
-    multiplierMax: '1,000x',
-    rtp: '96.0%',
-    popularity: 86,
-    bgGradient: 'from-red-600/25 to-amber-950/40',
-    accentColor: '#dc2626',
-    iconType: 'fire7',
-    description: 'Retro casino triple-7s with fiery scatter paylines and gamble ladder.'
-  },
-  {
     id: 'aviator',
     title: 'Aviator',
     category: 'crash',
@@ -192,18 +129,5 @@ export const CASINO_GAMES: CasinoGame[] = [
     accentColor: '#ef4444',
     iconType: 'redplane',
     description: 'The world famous red propeller flight crash game with live community chat and instant cashout.'
-  },
-  {
-    id: 'duck-hunters',
-    title: 'Duck Hunters',
-    category: 'instant',
-    badge: 'ARCADE',
-    multiplierMax: '500x',
-    rtp: '96.5%',
-    popularity: 85,
-    bgGradient: 'from-teal-500/25 to-amber-950/40',
-    accentColor: '#14b8a6',
-    iconType: 'target',
-    description: 'Classic arcade duck hunting bonus round with mystery multiplier shots.'
   }
 ];

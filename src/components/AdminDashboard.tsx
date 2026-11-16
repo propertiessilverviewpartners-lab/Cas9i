@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { Club, League, VirtualMatch } from '../types';
+import React, { useState, useEffect, useRef } from 'react';
+import { Club, League, VirtualMatch, RegisteredUser } from '../types';
 import { virtualEngine, PRESET_FIXTURES_INFO } from '../services/virtualEngine';
 import { soundManager } from '../services/soundEffects';
 import {
@@ -20,7 +20,12 @@ import {
   List,
   Trophy,
   X,
-  AlertTriangle
+  AlertTriangle,
+  Wallet,
+  UserCheck,
+  Edit3,
+  Clock,
+  Save
 } from 'lucide-react';
 
 interface AdminDashboardProps {
@@ -30,10 +35,21 @@ interface AdminDashboardProps {
   onNavigateSports: () => void;
 }
 
-type AdminPage = 'hub' | 'fix_match' | 'create_club' | 'club_directory' | 'leagues' | 'active' | 'delete_club';
+type AdminPage =
+  | 'hub'
+  | 'fix_match'
+  | 'create_club'
+  | 'club_directory'
+  | 'leagues'
+  | 'active'
+  | 'delete_club'
+  | 'deposit'
+  | 'users'
+  | 'edit_user';
 
 const CREST_OPTIONS = ['🛡️', '🟢', '🔴', '🔵', '🟡', '👑', '⚡', '🦁', '🦅', '🔥', '❄️', '🏛️', '⭐', '💎'];
 const LEAGUE_ICONS = ['🏆', '⚽', '🌍', '🔥', '👑', '⭐', '🛡️', '⚡'];
+const AVATAR_OPTIONS = ['🦁', '👑', '⚡', '💎', '⚽', '🎯', '🚀', '🔥'];
 
 const VALID_ADMIN_PAGES: AdminPage[] = [
   'hub',
@@ -42,12 +58,16 @@ const VALID_ADMIN_PAGES: AdminPage[] = [
   'club_directory',
   'leagues',
   'active',
-  'delete_club'
+  'delete_club',
+  'deposit',
+  'users',
+  'edit_user'
 ];
 
 function loadSavedAdminPage(): AdminPage {
   if (typeof window === 'undefined') return 'hub';
   const saved = window.localStorage.getItem('cas9i_admin_page') as AdminPage | null;
+  if (saved === 'edit_user') return 'users';
   return saved && VALID_ADMIN_PAGES.includes(saved) ? saved : 'hub';
 }
 
@@ -65,6 +85,53 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [expandedLeagueId, setExpandedLeagueId] = useState<string | null>(null);
   const [pendingDeleteClubId, setPendingDeleteClubId] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Registered Users, Top ID Search, Deposit & Edit User State
+  const [users, setUsers] = useState<RegisteredUser[]>([]);
+  const [usersFilter, setUsersFilter] = useState('');
+  const [pendingDeleteUserId, setPendingDeleteUserId] = useState<string | null>(null);
+  const [topSearchId, setTopSearchId] = useState('');
+  const [topSearchError, setTopSearchError] = useState<string | null>(null);
+  const [isSearchingUser, setIsSearchingUser] = useState(false);
+
+  // Deposit Page State
+  const [depositSearchId, setDepositSearchId] = useState('');
+  const [depositRecipient, setDepositRecipient] = useState<RegisteredUser | null>(null);
+  const [depositAmountInput, setDepositAmountInput] = useState('');
+  const [depositError, setDepositError] = useState<string | null>(null);
+  const [depositSuccessMsg, setDepositSuccessMsg] = useState<string | null>(null);
+  const [depositCountdown, setDepositCountdown] = useState<number | null>(null);
+  const depositTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Edit User Page State
+  const [selectedEditUser, setSelectedEditUser] = useState<RegisteredUser | null>(null);
+  const [editForm, setEditForm] = useState<{
+    username: string;
+    fullName: string;
+    email: string;
+    avatar: string;
+    phone: string;
+    country: string;
+    city: string;
+    address: string;
+    dateOfBirth: string;
+    kycIdNumber: string;
+    accountTier: 'Standard' | 'VIP' | 'Suspended';
+    notes: string;
+  }>({
+    username: '',
+    fullName: '',
+    email: '',
+    avatar: '🦁',
+    phone: '',
+    country: '',
+    city: '',
+    address: '',
+    dateOfBirth: '',
+    kycIdNumber: '',
+    accountTier: 'Standard',
+    notes: ''
+  });
 
   // Create Club State
   const [clubCreateMode, setClubCreateMode] = useState<'single' | 'bulk'>('single');
@@ -136,6 +203,177 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [homeClubId, awayClubId]);
 
+  // Fetch registered & verified users on mount and live updates
+  const loadUsersList = async () => {
+    try {
+      const list = await virtualEngine.fetchAdminUsers();
+      setUsers(list);
+    } catch {
+      // ignore if token not ready yet
+    }
+  };
+
+  useEffect(() => {
+    void loadUsersList();
+    const unsub = virtualEngine.onUsersChanged(() => {
+      void loadUsersList();
+    });
+    return () => {
+      unsub();
+      if (depositTimerRef.current) {
+        clearInterval(depositTimerRef.current);
+      }
+    };
+  }, []);
+
+  const openEditUserPage = (u: RegisteredUser) => {
+    setSelectedEditUser(u);
+    setEditForm({
+      username: u.username || '',
+      fullName: u.fullName || '',
+      email: u.email || '',
+      avatar: u.avatar || '🦁',
+      phone: u.phone || '',
+      country: u.country || '',
+      city: u.city || '',
+      address: u.address || '',
+      dateOfBirth: u.dateOfBirth || '',
+      kycIdNumber: u.kycIdNumber || '',
+      accountTier: u.accountTier || 'Standard',
+      notes: u.notes || ''
+    });
+    setTopSearchError(null);
+    setFormError(null);
+    setActivePage('edit_user');
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem('cas9i_admin_page', 'users');
+    }
+  };
+
+  const handleTopSearchById = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanId = topSearchId.trim().replace(/^#/, '');
+    if (!cleanId) {
+      setTopSearchError('Enter a user ID to search.');
+      return;
+    }
+    setTopSearchError(null);
+    setIsSearchingUser(true);
+    try {
+      const found = await virtualEngine.lookupAdminUserById(cleanId);
+      soundManager.playClick();
+      openEditUserPage(found);
+    } catch {
+      setTopSearchError(`User ID "${cleanId}" does not exist.`);
+    } finally {
+      setIsSearchingUser(false);
+    }
+  };
+
+  const handleDepositLookup = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (depositCountdown !== null) return;
+    const cleanId = depositSearchId.trim().replace(/^#/, '');
+    setDepositError(null);
+    setDepositSuccessMsg(null);
+
+    if (!cleanId) {
+      setDepositRecipient(null);
+      setDepositError('error');
+      return;
+    }
+
+    setIsSearchingUser(true);
+    try {
+      const found = await virtualEngine.lookupAdminUserById(cleanId);
+      if (!found || !found.fullName || !found.fullName.trim()) {
+        setDepositRecipient(null);
+        setDepositError('error');
+        return;
+      }
+      soundManager.playClick();
+      setDepositRecipient(found);
+      setDepositAmountInput('');
+    } catch {
+      setDepositRecipient(null);
+      setDepositError('error');
+    } finally {
+      setIsSearchingUser(false);
+    }
+  };
+
+  const handleDepositSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (depositCountdown !== null) return;
+
+    if (!depositRecipient || !depositRecipient.fullName || !depositRecipient.fullName.trim()) {
+      setDepositError('error');
+      return;
+    }
+
+    const amount = Number(depositAmountInput);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setDepositError('Please enter a valid deposit amount.');
+      return;
+    }
+
+    soundManager.playClick();
+    setDepositError(null);
+    setDepositSuccessMsg(null);
+    setDepositCountdown(5);
+
+    const targetUserId = depositRecipient.id;
+    let remaining = 5;
+    if (depositTimerRef.current) clearInterval(depositTimerRef.current);
+
+    depositTimerRef.current = setInterval(() => {
+      remaining -= 1;
+      if (remaining > 0) {
+        setDepositCountdown(remaining);
+        return;
+      }
+
+      if (depositTimerRef.current) {
+        clearInterval(depositTimerRef.current);
+        depositTimerRef.current = null;
+      }
+
+      void (async () => {
+        try {
+          const res = await virtualEngine.depositToUser(targetUserId, amount);
+          setDepositRecipient(res.user);
+          setUsers(res.users);
+          setDepositAmountInput('');
+          setDepositCountdown(null);
+          setDepositSuccessMsg(
+            `Deposit of $${res.depositedAmount.toFixed(2)} verified & lodged to ${res.user.fullName} (ID #${res.user.id}).`
+          );
+          showToast(`Deposited $${res.depositedAmount.toFixed(2)} to ${res.user.fullName}`);
+        } catch {
+          setDepositCountdown(null);
+          setDepositError('error');
+        }
+      })();
+    }, 1000);
+  };
+
+  const handleSaveUserInfo = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedEditUser || isSubmitting) return;
+    setFormError(null);
+    setIsSubmitting(true);
+    try {
+      const res = await virtualEngine.updateAdminUser(selectedEditUser.id, editForm);
+      setUsers(res.users);
+      setSelectedEditUser(res.user);
+      showToast(`Saved profile info for ${res.user.fullName} (ID #${res.user.id})`);
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : 'Unable to save user info.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
   const showToast = (msg: string) => {
     setToastMsg(msg);
     soundManager.playBetPlaced();
@@ -145,9 +383,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const handleOpenPage = (page: AdminPage) => {
     soundManager.playClick();
     setFormError(null);
+    setTopSearchError(null);
+    setDepositError(null);
+    setDepositSuccessMsg(null);
     setPendingDeleteClubId(null);
+    setPendingDeleteUserId(null);
     setActivePage(page);
-    if (typeof window !== 'undefined') {
+    if (page === 'users' || page === 'deposit') {
+      void loadUsersList();
+    }
+    if (typeof window !== 'undefined' && page !== 'edit_user') {
       window.localStorage.setItem('cas9i_admin_page', page);
     }
   };
@@ -361,6 +606,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     l.country.toLowerCase().includes(leagueSearch.toLowerCase())
   );
 
+  const filteredUsers = users.filter(u => {
+    const q = usersFilter.trim().toLowerCase();
+    if (!q) return true;
+    return (
+      u.id.toLowerCase().includes(q) ||
+      u.username.toLowerCase().includes(q) ||
+      u.fullName.toLowerCase().includes(q) ||
+      u.email.toLowerCase().includes(q)
+    );
+  });
+
   const pageTitleMap: Record<AdminPage, string> = {
     hub: 'Admin Dashboard',
     fix_match: 'Fix Match',
@@ -368,103 +624,141 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     club_directory: 'Club Directory',
     leagues: 'Leagues',
     active: 'Active Matches',
-    delete_club: 'Delete Club'
+    delete_club: 'Delete Club',
+    deposit: 'Deposit Funds',
+    users: 'Registered Users',
+    edit_user: selectedEditUser ? `User Profile #${selectedEditUser.id}` : 'Update User Info'
   };
 
   const pageSubtitleMap: Record<AdminPage, string> = {
-    hub: 'Select an admin action to manage clubs, leagues, and virtual fixtures',
+    hub: 'Manage clubs, leagues, fixtures, user deposits, and registered profiles',
     fix_match: 'Schedule & fix virtual matches — auto-synced across all users & devices',
     create_club: 'Register a permanent virtual club until explicitly deleted by admin',
     club_directory: 'Browse all permanently registered clubs and team power ratings',
     leagues: 'All currently deployed and active leagues in the system',
     active: 'Manage live scores, kickoffs, or reset active fixtures',
-    delete_club: 'Permanently delete a club — cannot be undone'
+    delete_club: 'Permanently delete a club — cannot be undone',
+    deposit: 'Search user by ID, verify recipient full name, and lodge deposit',
+    users: 'All verified registered users — update details or remove profiles',
+    edit_user: 'Registration fields are pre-filled; complete and save remaining user details'
   };
 
   return (
     <div className="space-y-4 pb-10 px-3 sm:px-5 pt-3 max-w-5xl mx-auto">
       {/* Top Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#00e700]/20 pb-3">
-        <div className="flex items-center gap-2.5 min-w-0">
-          {activePage !== 'hub' ? (
-            <button
-              onClick={() => handleOpenPage('hub')}
-              className="h-9 px-3 rounded-xl bg-[#062416] hover:bg-[#0e4425] border border-[#00e700]/35 text-xs font-bold text-[#00e700] flex items-center gap-1.5 transition-all active:scale-95 shrink-0"
-            >
-              <ArrowLeft className="w-4 h-4" />
-              <span>Back</span>
-            </button>
-          ) : (
-            <div className="w-9 h-9 rounded-xl bg-[#00ad3a]/20 border border-[#00e700]/40 flex items-center justify-center text-[#00e700] shrink-0">
-              <ShieldCheck className="w-5 h-5" />
-            </div>
-          )}
+      <div className="border-b border-[#00e700]/20 pb-3 space-y-2.5">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2.5 min-w-0">
+            {activePage !== 'hub' ? (
+              <button
+                onClick={() => handleOpenPage(activePage === 'edit_user' ? 'users' : 'hub')}
+                className="h-9 px-3 rounded-xl bg-[#062416] hover:bg-[#0e4425] border border-[#00e700]/35 text-xs font-bold text-[#00e700] flex items-center gap-1.5 transition-all active:scale-95 shrink-0 whitespace-nowrap"
+              >
+                <ArrowLeft className="w-4 h-4" />
+                <span>Back</span>
+              </button>
+            ) : (
+              <div className="w-9 h-9 rounded-xl bg-[#00ad3a]/20 border border-[#00e700]/40 flex items-center justify-center text-[#00e700] shrink-0">
+                <ShieldCheck className="w-5 h-5" />
+              </div>
+            )}
 
-          <div className="min-w-0">
-            <h2 className="text-base sm:text-lg font-black text-white tracking-wide truncate">
-              {pageTitleMap[activePage]}
-            </h2>
-            <p className="text-[11px] text-zinc-400 truncate">
-              {pageSubtitleMap[activePage]}
-            </p>
+            <div className="min-w-0">
+              <h2 className="text-base sm:text-lg font-black text-white tracking-wide truncate">
+                {pageTitleMap[activePage]}
+              </h2>
+              <p className="text-[11px] text-zinc-400 truncate">
+                {pageSubtitleMap[activePage]}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            {activePage === 'leagues' && (
+              <div className="flex items-center gap-1.5">
+                {/* Red + button: Auto-generate 5 permanent clubs */}
+                <button
+                  type="button"
+                  disabled={isSubmitting}
+                  onClick={handleAutoGenerateFiveClubs}
+                  aria-label="Auto-generate 5 new clubs"
+                  title="Auto-generate 5 permanent new clubs"
+                  className="w-9 h-9 rounded-xl bg-red-600 hover:bg-red-500 text-white font-black flex items-center justify-center shadow-[0_0_14px_rgba(220,38,38,0.45)] active:scale-95 transition-all disabled:opacity-50"
+                >
+                  <Plus className="w-5 h-5 stroke-[2.75]" />
+                </button>
+
+                {/* Blue + button: Auto-deploy 3 different clubs to each league */}
+                <button
+                  type="button"
+                  disabled={isSubmitting}
+                  onClick={handleDeployThreePerLeague}
+                  aria-label="Auto-deploy 3 new clubs to each league"
+                  title="Auto-deploy 3 different new clubs to each league"
+                  className="w-9 h-9 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-black flex items-center justify-center shadow-[0_0_14px_rgba(37,99,235,0.45)] active:scale-95 transition-all disabled:opacity-50"
+                >
+                  <Plus className="w-5 h-5 stroke-[2.75]" />
+                </button>
+
+                {/* Green + button: Create Custom League */}
+                <button
+                  type="button"
+                  disabled={isSubmitting}
+                  onClick={() => {
+                    soundManager.playClick();
+                    setLeagueModalError(null);
+                    setIsLeagueModalOpen(true);
+                  }}
+                  aria-label="Create Custom League"
+                  title="Create Custom League"
+                  className="w-9 h-9 rounded-xl bg-gradient-to-r from-[#00ad3a] to-[#00e700] text-black font-black flex items-center justify-center shadow-[0_0_15px_rgba(0,231,0,0.4)] hover:brightness-110 active:scale-95 transition-all disabled:opacity-50"
+                >
+                  <Plus className="w-5 h-5 stroke-[2.75]" />
+                </button>
+              </div>
+            )}
+
+            <button
+              onClick={() => {
+                soundManager.playClick();
+                onNavigateSports();
+              }}
+              className="h-9 px-3 rounded-xl bg-[#062416] hover:bg-[#0e4425] border border-[#00e700]/35 text-xs font-bold text-white flex items-center gap-1.5 transition-all active:scale-95 shrink-0 whitespace-nowrap"
+            >
+              <span>View Homepage</span>
+            </button>
           </div>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
-          {activePage === 'leagues' && (
-            <div className="flex items-center gap-1.5">
-              {/* Red + button: Auto-generate 5 permanent clubs */}
-              <button
-                type="button"
-                disabled={isSubmitting}
-                onClick={handleAutoGenerateFiveClubs}
-                aria-label="Auto-generate 5 new clubs"
-                title="Auto-generate 5 permanent new clubs"
-                className="w-9 h-9 rounded-xl bg-red-600 hover:bg-red-500 text-white font-black flex items-center justify-center shadow-[0_0_14px_rgba(220,38,38,0.45)] active:scale-95 transition-all disabled:opacity-50"
-              >
-                <Plus className="w-5 h-5 stroke-[2.75]" />
-              </button>
-
-              {/* Blue + button: Auto-deploy 3 different clubs to each league */}
-              <button
-                type="button"
-                disabled={isSubmitting}
-                onClick={handleDeployThreePerLeague}
-                aria-label="Auto-deploy 3 new clubs to each league"
-                title="Auto-deploy 3 different new clubs to each league"
-                className="w-9 h-9 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-black flex items-center justify-center shadow-[0_0_14px_rgba(37,99,235,0.45)] active:scale-95 transition-all disabled:opacity-50"
-              >
-                <Plus className="w-5 h-5 stroke-[2.75]" />
-              </button>
-
-              {/* Green + button: Create Custom League */}
-              <button
-                type="button"
-                disabled={isSubmitting}
-                onClick={() => {
-                  soundManager.playClick();
-                  setLeagueModalError(null);
-                  setIsLeagueModalOpen(true);
-                }}
-                aria-label="Create Custom League"
-                title="Create Custom League"
-                className="w-9 h-9 rounded-xl bg-gradient-to-r from-[#00ad3a] to-[#00e700] text-black font-black flex items-center justify-center shadow-[0_0_15px_rgba(0,231,0,0.4)] hover:brightness-110 active:scale-95 transition-all disabled:opacity-50"
-              >
-                <Plus className="w-5 h-5 stroke-[2.75]" />
-              </button>
-            </div>
-          )}
-
+        {/* Top User ID Search Bar */}
+        <form onSubmit={handleTopSearchById} className="flex items-center gap-2">
+          <div className="flex-1 flex items-center bg-[#03150b] border border-[#00e700]/30 focus-within:border-[#00e700] rounded-xl px-3 h-9">
+            <Search className="w-4 h-4 text-[#00e700] mr-2 shrink-0" />
+            <input
+              type="text"
+              value={topSearchId}
+              onChange={e => {
+                setTopSearchId(e.target.value);
+                if (topSearchError) setTopSearchError(null);
+              }}
+              placeholder="Search user data by ID (e.g. 100001)..."
+              className="bg-transparent text-xs font-bold text-white placeholder-zinc-500 focus:outline-none w-full font-mono tabular-nums"
+            />
+          </div>
           <button
-            onClick={() => {
-              soundManager.playClick();
-              onNavigateSports();
-            }}
-            className="h-9 px-3 rounded-xl bg-[#062416] hover:bg-[#0e4425] border border-[#00e700]/35 text-xs font-bold text-white flex items-center gap-1.5 transition-all active:scale-95 shrink-0"
+            type="submit"
+            disabled={isSearchingUser}
+            className="h-9 px-4 rounded-xl bg-[#00ad3a] hover:bg-[#00c844] text-black font-black text-xs whitespace-nowrap active:scale-95 transition-all disabled:opacity-50 shrink-0"
           >
-            <span>View Homepage</span>
+            {isSearchingUser ? 'Searching...' : 'Search ID'}
           </button>
-        </div>
+        </form>
+
+        {topSearchError && (
+          <div className="bg-red-950/70 border border-red-600/50 text-red-200 text-xs font-bold px-3 py-2 rounded-xl">
+            {topSearchError}
+          </div>
+        )}
       </div>
 
       {/* Live Toast Feedback */}
@@ -500,6 +794,46 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
           {/* Dedicated Action Buttons -> Open Separate Pages */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {/* Deposit */}
+            <button
+              onClick={() => handleOpenPage('deposit')}
+              className="group w-full text-left bg-gradient-to-br from-[#09321c] to-[#051c10] hover:from-[#0e4728] hover:to-[#072616] border border-[#00e700]/45 hover:border-[#00e700] rounded-2xl p-4 sm:p-5 transition-all active:scale-[0.98] shadow-[0_4px_20px_rgba(0,0,0,0.4)] flex items-center justify-between gap-3"
+            >
+              <div className="flex items-center gap-3.5 min-w-0">
+                <div className="w-12 h-12 rounded-xl bg-[#00ad3a]/25 border border-[#00e700]/45 flex items-center justify-center text-[#00e700] shrink-0 group-hover:scale-105 transition-transform">
+                  <Wallet className="w-6 h-6" />
+                </div>
+                <div className="min-w-0">
+                  <span className="text-base font-black text-white block">Deposit</span>
+                  <span className="text-xs text-zinc-400 block mt-0.5">
+                    Search user by ID &amp; verify 5s deposit credit
+                  </span>
+                </div>
+              </div>
+              <ChevronRight className="w-5 h-5 text-[#00e700] shrink-0 group-hover:translate-x-0.5 transition-transform" />
+            </button>
+
+            {/* Users */}
+            <button
+              onClick={() => handleOpenPage('users')}
+              className="group w-full text-left bg-gradient-to-br from-[#09321c] to-[#051c10] hover:from-[#0e4728] hover:to-[#072616] border border-[#00e700]/45 hover:border-[#00e700] rounded-2xl p-4 sm:p-5 transition-all active:scale-[0.98] shadow-[0_4px_20px_rgba(0,0,0,0.4)] flex items-center justify-between gap-3"
+            >
+              <div className="flex items-center gap-3.5 min-w-0">
+                <div className="w-12 h-12 rounded-xl bg-emerald-500/20 border border-emerald-400/40 flex items-center justify-center text-emerald-300 shrink-0 group-hover:scale-105 transition-transform">
+                  <UserCheck className="w-6 h-6" />
+                </div>
+                <div className="min-w-0">
+                  <span className="text-base font-black text-white block">
+                    Users <span className="text-xs font-bold text-[#00e700] ml-1 tabular-nums">({users.length})</span>
+                  </span>
+                  <span className="text-xs text-zinc-400 block mt-0.5">
+                    Verified accounts, update profiles or delete users
+                  </span>
+                </div>
+              </div>
+              <ChevronRight className="w-5 h-5 text-emerald-300 shrink-0 group-hover:translate-x-0.5 transition-transform" />
+            </button>
+
             {/* 1. Fix Match */}
             <button
               onClick={() => handleOpenPage('fix_match')}
@@ -1465,6 +1799,508 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               })}
             </div>
           )}
+        </div>
+      )}
+
+      {/* PAGE 7: ADMIN DEPOSIT PAGE (SEARCH USER BY ID -> RECIPIENT FULL NAME -> 5s VERIFY DEPOSIT) */}
+      {activePage === 'deposit' && (
+        <div className="max-w-xl mx-auto space-y-3">
+          <div className="bg-[#051c10]/95 border border-[#00e700]/25 rounded-2xl p-4 sm:p-5 space-y-4">
+            <div className="flex items-center justify-between border-b border-[#00e700]/15 pb-3">
+              <div className="flex items-center gap-2">
+                <Wallet className="w-4 h-4 text-[#00e700] shrink-0" />
+                <div>
+                  <h3 className="text-sm sm:text-base font-black text-white">Deposit to User Account</h3>
+                  <span className="text-[11px] text-zinc-400">
+                    Search recipient by User ID number · 5-second verification before lodging
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <form onSubmit={handleDepositLookup} className="flex items-center gap-2">
+              <div className="flex-1 flex items-center bg-[#03150b] border border-zinc-700 focus-within:border-[#00e700] rounded-xl px-3 h-10">
+                <Search className="w-4 h-4 text-zinc-400 mr-2 shrink-0" />
+                <input
+                  type="text"
+                  value={depositSearchId}
+                  onChange={e => {
+                    setDepositSearchId(e.target.value);
+                    if (depositError) setDepositError(null);
+                  }}
+                  placeholder="Enter User ID number (e.g. 100001)"
+                  className="bg-transparent text-xs sm:text-sm font-mono font-bold text-white placeholder-zinc-500 focus:outline-none w-full tabular-nums"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={isSearchingUser || depositCountdown !== null}
+                className="h-10 px-4 rounded-xl bg-[#00ad3a] hover:bg-[#00c844] text-black font-black text-xs whitespace-nowrap active:scale-95 transition-all disabled:opacity-50 shrink-0"
+              >
+                {isSearchingUser ? 'Searching...' : 'Search'}
+              </button>
+            </form>
+
+            {depositError && (
+              <div className="bg-red-950/80 border border-red-600/60 text-red-200 text-xs sm:text-sm font-black p-3 rounded-xl flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+                <span>{depositError}</span>
+              </div>
+            )}
+
+            {depositSuccessMsg && (
+              <div className="bg-[#00ad3a]/20 border border-[#00e700]/50 text-[#00e700] text-xs font-black p-3 rounded-xl flex items-center gap-2">
+                <CheckCircle className="w-4 h-4 shrink-0" />
+                <span>{depositSuccessMsg}</span>
+              </div>
+            )}
+
+            {depositRecipient && (
+              <form onSubmit={handleDepositSubmit} className="space-y-3.5 pt-1">
+                <div className="bg-[#062416] border border-[#00e700]/35 rounded-xl p-3.5 space-y-2">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400 block">
+                    Recipient
+                  </span>
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <span className="text-2xl shrink-0">{depositRecipient.avatar}</span>
+                      <div className="min-w-0">
+                        <span className="text-base font-black text-white block truncate">
+                          {depositRecipient.fullName}
+                        </span>
+                        <span className="text-xs text-zinc-400 font-mono tabular-nums block truncate">
+                          ID #{depositRecipient.id} · @{depositRecipient.username}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <span className="text-[10px] text-zinc-400 font-bold block">Balance</span>
+                      <span className="text-sm font-black text-[#00e700] tabular-nums">
+                        ${depositRecipient.balance.toFixed(2)}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-xs font-bold text-zinc-400 block mb-1">
+                    Deposit Amount (USD)
+                  </label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="1"
+                    required
+                    disabled={depositCountdown !== null}
+                    value={depositAmountInput}
+                    onChange={e => setDepositAmountInput(e.target.value)}
+                    placeholder="Enter deposit amount (e.g. 5000)"
+                    className="w-full bg-[#03150b] border border-[#00e700]/30 rounded-xl px-3.5 py-2.5 text-sm font-black text-white placeholder-zinc-500 focus:outline-none focus:border-[#00e700] tabular-nums disabled:opacity-50"
+                  />
+                </div>
+
+                {depositCountdown !== null && (
+                  <div className="bg-amber-950/60 border border-amber-500/40 rounded-xl p-3 flex items-center justify-between gap-2 text-xs font-black text-amber-300">
+                    <div className="flex items-center gap-2">
+                      <Clock className="w-4 h-4 animate-spin shrink-0" />
+                      <span>Verifying user {depositRecipient.fullName} &amp; lodging deposit...</span>
+                    </div>
+                    <span className="font-mono text-sm tabular-nums">{depositCountdown}s</span>
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={depositCountdown !== null}
+                  className="w-full h-11 rounded-xl bg-gradient-to-r from-[#00ad3a] to-[#00e700] text-black font-black text-xs sm:text-sm uppercase tracking-wider shadow-[0_0_20px_rgba(0,231,0,0.35)] hover:brightness-110 active:scale-[0.98] transition-all flex items-center justify-center gap-2 disabled:opacity-60 whitespace-nowrap"
+                >
+                  <Wallet className="w-4 h-4" />
+                  <span>
+                    {depositCountdown !== null
+                      ? `Verifying User (${depositCountdown}s)...`
+                      : 'Deposit'}
+                  </span>
+                </button>
+              </form>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* PAGE 8: REGISTERED USERS DIRECTORY */}
+      {activePage === 'users' && (
+        <div className="bg-[#051c10]/95 border border-[#00e700]/25 rounded-2xl p-3 sm:p-4 space-y-3">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 border-b border-[#00e700]/15 pb-3">
+            <div className="flex items-center gap-2">
+              <UserCheck className="w-4 h-4 text-[#00e700] shrink-0" />
+              <div>
+                <h3 className="text-sm font-black text-white tabular-nums">
+                  Verified Registered Users ({users.length})
+                </h3>
+                <span className="text-[11px] text-zinc-400">
+                  Automatically populated once a user registers and verifies
+                </span>
+              </div>
+            </div>
+
+            <div className="flex items-center bg-[#03150b] border border-zinc-700 rounded-xl px-3 h-9">
+              <Search className="w-3.5 h-3.5 text-zinc-400 mr-2 shrink-0" />
+              <input
+                type="text"
+                value={usersFilter}
+                onChange={e => setUsersFilter(e.target.value)}
+                placeholder="Filter ID, username, name..."
+                className="bg-transparent text-xs text-white placeholder-zinc-500 focus:outline-none w-full sm:w-52"
+              />
+            </div>
+          </div>
+
+          {filteredUsers.length === 0 ? (
+            <div className="py-12 text-center space-y-1.5">
+              <p className="text-xs font-bold text-zinc-300">No verified registered users yet.</p>
+              <span className="text-[11px] text-zinc-500 block">
+                Once a player completes registration &amp; verification, their profile appears here.
+              </span>
+            </div>
+          ) : (
+            <div className="space-y-2 max-h-[540px] overflow-y-auto pr-1">
+              {filteredUsers.map(u => {
+                const isConfirmingDelete = pendingDeleteUserId === u.id;
+                return (
+                  <div
+                    key={u.id}
+                    className="bg-[#062416] border border-[#00e700]/20 rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5"
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="w-10 h-10 rounded-xl bg-[#03150b] border border-[#00e700]/30 flex items-center justify-center text-xl shrink-0">
+                        {u.avatar}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-sm font-black text-white truncate">@{u.username}</span>
+                          <span className="text-xs font-mono font-black text-[#00e700] tabular-nums">
+                            #{u.id}
+                          </span>
+                          <span className="text-xs font-bold text-zinc-300 truncate">{u.fullName}</span>
+                        </div>
+                        <div className="flex items-center gap-2 text-[11px] text-zinc-400 mt-0.5 flex-wrap">
+                          <span className="truncate">{u.email}</span>
+                          <span>·</span>
+                          <span className="font-mono font-bold text-[#00e700] tabular-nums">
+                            ${u.balance.toFixed(2)}
+                          </span>
+                          {u.phone && (
+                            <>
+                              <span>·</span>
+                              <span className="truncate">{u.phone}</span>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {isConfirmingDelete ? (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => setPendingDeleteUserId(null)}
+                            className="h-9 px-3 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-bold whitespace-nowrap active:scale-95 transition-all"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              soundManager.playClick();
+                              try {
+                                const updatedList = await virtualEngine.deleteAdminUser(u.id);
+                                setUsers(updatedList);
+                                setPendingDeleteUserId(null);
+                                showToast(`Deleted user @${u.username} (ID #${u.id})`);
+                              } catch (err) {
+                                showToast(err instanceof Error ? err.message : 'Unable to delete user.');
+                              }
+                            }}
+                            className="h-9 px-3 rounded-lg bg-red-600 hover:bg-red-500 text-white text-xs font-black flex items-center gap-1 whitespace-nowrap active:scale-95 transition-all"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            <span>Confirm</span>
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              soundManager.playClick();
+                              openEditUserPage(u);
+                            }}
+                            className="h-9 px-3 rounded-lg bg-[#00ad3a] hover:bg-[#00c844] text-black text-xs font-black flex items-center gap-1.5 whitespace-nowrap active:scale-95 transition-all"
+                          >
+                            <Edit3 className="w-3.5 h-3.5" />
+                            <span>Update</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              soundManager.playClick();
+                              setPendingDeleteUserId(u.id);
+                            }}
+                            className="h-9 px-3 rounded-lg bg-red-600/20 hover:bg-red-600 text-red-300 hover:text-white border border-red-500/40 text-xs font-black flex items-center gap-1.5 whitespace-nowrap active:scale-95 transition-all"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            <span>Delete</span>
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* PAGE 9: USER INFO UPDATE FORM (PRE-FILLED REGISTRATION FIELDS + ADDITIONAL FIELDS) */}
+      {activePage === 'edit_user' && selectedEditUser && (
+        <div className="max-w-2xl mx-auto">
+          <form
+            onSubmit={handleSaveUserInfo}
+            className="bg-[#051c10]/95 border border-[#00e700]/25 rounded-2xl p-4 sm:p-5 space-y-4"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#00e700]/15 pb-3">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <span className="text-2xl">{editForm.avatar}</span>
+                <div className="min-w-0">
+                  <h3 className="text-sm sm:text-base font-black text-white truncate">
+                    {selectedEditUser.fullName} <span className="font-mono text-[#00e700] tabular-nums">#{selectedEditUser.id}</span>
+                  </h3>
+                  <span className="text-[11px] text-zinc-400 block">
+                    Balance: <span className="text-[#00e700] font-bold tabular-nums">${selectedEditUser.balance.toFixed(2)}</span> · Verified Account
+                  </span>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  soundManager.playClick();
+                  setDepositRecipient(selectedEditUser);
+                  setDepositSearchId(selectedEditUser.id);
+                  setDepositError(null);
+                  setDepositSuccessMsg(null);
+                  handleOpenPage('deposit');
+                }}
+                className="h-9 px-3 rounded-xl bg-[#062416] hover:bg-[#0e4425] border border-[#00e700]/40 text-xs font-black text-[#00e700] flex items-center gap-1.5 whitespace-nowrap"
+              >
+                <Wallet className="w-3.5 h-3.5" />
+                <span>Deposit Funds</span>
+              </button>
+            </div>
+
+            {formError && (
+              <div className="bg-red-950/70 border border-red-600/50 text-red-200 text-xs font-bold p-2.5 rounded-xl">
+                {formError}
+              </div>
+            )}
+
+            {/* Pre-filled Registration Details */}
+            <div className="space-y-3">
+              <span className="text-[11px] font-black uppercase tracking-wider text-[#00e700] block">
+                Registration Details (Auto-Filled)
+              </span>
+
+              <div>
+                <label className="text-xs font-bold text-zinc-400 block mb-1.5">Avatar</label>
+                <div className="flex flex-wrap gap-1.5 bg-[#03150b] p-2 rounded-xl border border-zinc-800">
+                  {AVATAR_OPTIONS.map(av => (
+                    <button
+                      type="button"
+                      key={av}
+                      onClick={() => {
+                        soundManager.playClick();
+                        setEditForm(prev => ({ ...prev, avatar: av }));
+                      }}
+                      className={`w-9 h-9 rounded-lg text-lg flex items-center justify-center transition-all ${
+                        editForm.avatar === av ? 'bg-[#00ad3a]/40 ring-2 ring-[#00e700] scale-105' : 'hover:bg-white/5'
+                      }`}
+                    >
+                      {av}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                <div>
+                  <label className="text-xs font-bold text-zinc-400 block mb-1">User ID</label>
+                  <input
+                    type="text"
+                    readOnly
+                    value={selectedEditUser.id}
+                    className="w-full bg-[#020e07] border border-zinc-800 rounded-xl px-3 py-2 text-xs font-mono font-black text-[#00e700] tabular-nums focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs font-bold text-zinc-400 block mb-1">Username</label>
+                  <input
+                    type="text"
+                    required
+                    value={editForm.username}
+                    onChange={e => setEditForm(prev => ({ ...prev, username: e.target.value }))}
+                    className="w-full bg-[#03150b] border border-[#00e700]/30 rounded-xl px-3 py-2 text-xs font-bold text-white focus:outline-none focus:border-[#00e700]"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs font-bold text-zinc-400 block mb-1">Full Name</label>
+                  <input
+                    type="text"
+                    required
+                    value={editForm.fullName}
+                    onChange={e => setEditForm(prev => ({ ...prev, fullName: e.target.value }))}
+                    className="w-full bg-[#03150b] border border-[#00e700]/30 rounded-xl px-3 py-2 text-xs font-bold text-white focus:outline-none focus:border-[#00e700]"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs font-bold text-zinc-400 block mb-1">Email Address</label>
+                  <input
+                    type="email"
+                    required
+                    value={editForm.email}
+                    onChange={e => setEditForm(prev => ({ ...prev, email: e.target.value }))}
+                    className="w-full bg-[#03150b] border border-[#00e700]/30 rounded-xl px-3 py-2 text-xs font-bold text-white focus:outline-none focus:border-[#00e700]"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Additional User Info Fields */}
+            <div className="space-y-3 pt-2 border-t border-[#00e700]/15">
+              <span className="text-[11px] font-black uppercase tracking-wider text-zinc-300 block">
+                Additional Profile Information
+              </span>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                <div>
+                  <label className="text-xs font-bold text-zinc-400 block mb-1">Phone Number</label>
+                  <input
+                    type="text"
+                    value={editForm.phone}
+                    onChange={e => setEditForm(prev => ({ ...prev, phone: e.target.value }))}
+                    placeholder="Enter phone number"
+                    className="w-full bg-[#03150b] border border-zinc-700 rounded-xl px-3 py-2 text-xs font-bold text-white placeholder-zinc-600 focus:outline-none focus:border-[#00e700]"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs font-bold text-zinc-400 block mb-1">Country</label>
+                  <input
+                    type="text"
+                    value={editForm.country}
+                    onChange={e => setEditForm(prev => ({ ...prev, country: e.target.value }))}
+                    placeholder="Enter country"
+                    className="w-full bg-[#03150b] border border-zinc-700 rounded-xl px-3 py-2 text-xs font-bold text-white placeholder-zinc-600 focus:outline-none focus:border-[#00e700]"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs font-bold text-zinc-400 block mb-1">City</label>
+                  <input
+                    type="text"
+                    value={editForm.city}
+                    onChange={e => setEditForm(prev => ({ ...prev, city: e.target.value }))}
+                    placeholder="Enter city"
+                    className="w-full bg-[#03150b] border border-zinc-700 rounded-xl px-3 py-2 text-xs font-bold text-white placeholder-zinc-600 focus:outline-none focus:border-[#00e700]"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs font-bold text-zinc-400 block mb-1">Date of Birth</label>
+                  <input
+                    type="date"
+                    value={editForm.dateOfBirth}
+                    onChange={e => setEditForm(prev => ({ ...prev, dateOfBirth: e.target.value }))}
+                    className="w-full bg-[#03150b] border border-zinc-700 rounded-xl px-3 py-2 text-xs font-bold text-white focus:outline-none focus:border-[#00e700]"
+                  />
+                </div>
+
+                <div className="sm:col-span-2">
+                  <label className="text-xs font-bold text-zinc-400 block mb-1">Home Address</label>
+                  <input
+                    type="text"
+                    value={editForm.address}
+                    onChange={e => setEditForm(prev => ({ ...prev, address: e.target.value }))}
+                    placeholder="Enter street address"
+                    className="w-full bg-[#03150b] border border-zinc-700 rounded-xl px-3 py-2 text-xs font-bold text-white placeholder-zinc-600 focus:outline-none focus:border-[#00e700]"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs font-bold text-zinc-400 block mb-1">KYC / National ID Number</label>
+                  <input
+                    type="text"
+                    value={editForm.kycIdNumber}
+                    onChange={e => setEditForm(prev => ({ ...prev, kycIdNumber: e.target.value }))}
+                    placeholder="Enter ID / Passport No."
+                    className="w-full bg-[#03150b] border border-zinc-700 rounded-xl px-3 py-2 text-xs font-bold text-white placeholder-zinc-600 focus:outline-none focus:border-[#00e700]"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs font-bold text-zinc-400 block mb-1">Account Tier</label>
+                  <select
+                    value={editForm.accountTier}
+                    onChange={e =>
+                      setEditForm(prev => ({
+                        ...prev,
+                        accountTier: e.target.value as 'Standard' | 'VIP' | 'Suspended'
+                      }))
+                    }
+                    className="w-full bg-[#03150b] border border-zinc-700 rounded-xl px-3 py-2 text-xs font-bold text-white focus:outline-none focus:border-[#00e700]"
+                  >
+                    <option value="Standard">Standard</option>
+                    <option value="VIP">VIP</option>
+                    <option value="Suspended">Suspended</option>
+                  </select>
+                </div>
+
+                <div className="sm:col-span-2">
+                  <label className="text-xs font-bold text-zinc-400 block mb-1">Admin Notes</label>
+                  <textarea
+                    rows={3}
+                    value={editForm.notes}
+                    onChange={e => setEditForm(prev => ({ ...prev, notes: e.target.value }))}
+                    placeholder="Optional notes on user profile..."
+                    className="w-full bg-[#03150b] border border-zinc-700 rounded-xl p-3 text-xs font-bold text-white placeholder-zinc-600 focus:outline-none focus:border-[#00e700] resize-y"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => handleOpenPage('users')}
+                className="h-11 px-4 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-bold text-xs whitespace-nowrap"
+              >
+                All Users
+              </button>
+              <button
+                type="submit"
+                disabled={isSubmitting}
+                className="flex-1 h-11 rounded-xl bg-gradient-to-r from-[#00ad3a] to-[#00e700] text-black font-black text-xs sm:text-sm uppercase tracking-wider shadow-[0_0_20px_rgba(0,231,0,0.35)] hover:brightness-110 active:scale-[0.98] transition-all flex items-center justify-center gap-2 disabled:opacity-50 whitespace-nowrap"
+              >
+                <Save className="w-4 h-4" />
+                <span>{isSubmitting ? 'Saving...' : 'Save User Info'}</span>
+              </button>
+            </div>
+          </form>
         </div>
       )}
 

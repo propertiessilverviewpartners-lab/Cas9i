@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   VirtualMatch,
   BetSelection,
@@ -92,16 +92,35 @@ function loadSavedJson<T>(key: string, fallback: T): T {
   }
 }
 
+const CHECK_BETS_RESET_KEY = 'cas9i_check_bets_reset_v2';
+
+function ensureCheckBetsResetOnce() {
+  if (typeof window === 'undefined') return;
+  try {
+    if (window.localStorage.getItem(CHECK_BETS_RESET_KEY) !== '1') {
+      window.localStorage.removeItem('cas9i_placed_bets');
+      window.localStorage.removeItem('cas9i_fx_positions');
+      window.localStorage.setItem(CHECK_BETS_RESET_KEY, '1');
+    }
+  } catch {
+    // ignore storage errors
+  }
+}
+
 export default function App() {
-  const [initialUser] = useState<UserProfile>(() => loadSavedUser());
+  const [initialUser] = useState<UserProfile>(() => {
+    ensureCheckBetsResetOnce();
+    return loadSavedUser();
+  });
   const [activeTab, setActiveTab] = useState<MainTab>(() => loadSavedTab(initialUser));
   const [matches, setMatches] = useState<VirtualMatch[]>(virtualEngine.getMatches());
   const [tipsterBetcodes, setTipsterBetcodes] = useState<TipsterBetcode[]>(virtualEngine.getTipsterBetcodes());
   const [h2hRecords, setH2HRecords] = useState<H2HRecord[]>(virtualEngine.getH2HRecords());
   const [fxAssets, setFxAssets] = useState<FXAsset[]>(virtualEngine.getFxAssets());
-  const [fxPositions, setFxPositions] = useState<FXPosition[]>(() =>
-    loadSavedJson<FXPosition[]>('cas9i_fx_positions', [])
-  );
+  const [fxPositions, setFxPositions] = useState<FXPosition[]>(() => {
+    ensureCheckBetsResetOnce();
+    return loadSavedJson<FXPosition[]>('cas9i_fx_positions', []);
+  });
   const [clubs, setClubs] = useState<Club[]>(virtualEngine.getClubs());
   const [leagues, setLeagues] = useState<League[]>(virtualEngine.getLeagues());
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>(virtualEngine.getLeaderboard());
@@ -109,9 +128,10 @@ export default function App() {
   const [selectedSelections, setSelectedSelections] = useState<BetSelection[]>(() =>
     loadSavedJson<BetSelection[]>('cas9i_selected_selections', [])
   );
-  const [placedBets, setPlacedBets] = useState<PlacedBet[]>(() =>
-    loadSavedJson<PlacedBet[]>('cas9i_placed_bets', [])
-  );
+  const [placedBets, setPlacedBets] = useState<PlacedBet[]>(() => {
+    ensureCheckBetsResetOnce();
+    return loadSavedJson<PlacedBet[]>('cas9i_placed_bets', []);
+  });
 
   // Modals & Drawers
   const [isBetslipOpen, setIsBetslipOpen] = useState(false);
@@ -130,8 +150,14 @@ export default function App() {
 
   // User profile (persisted in localStorage when logged in)
   const [user, setUser] = useState<UserProfile>(initialUser);
+  const userIdRef = useRef<string>(initialUser.id);
+  const userRef = useRef<UserProfile>(initialUser);
+  useEffect(() => {
+    userIdRef.current = user.id;
+    userRef.current = user;
+  }, [user]);
 
-  // Persist user session & verify admin token with server on startup
+  // Persist user session & verify admin token / registered user session with server on startup
   useEffect(() => {
     if (typeof window === 'undefined') return;
     if (user.isLoggedIn) {
@@ -162,14 +188,40 @@ export default function App() {
   }, [fxPositions]);
 
   useEffect(() => {
-    if (!user.isAdmin) return;
-    void virtualEngine.verifyAdminSession().then(status => {
-      if (status === 'invalid') {
-        virtualEngine.setAdminToken(null);
-        setUser(DEFAULT_GUEST_USER);
-        setActiveTab('sports');
-      }
-    });
+    if (user.isAdmin) {
+      void virtualEngine.verifyAdminSession().then(status => {
+        if (status === 'invalid') {
+          virtualEngine.setAdminToken(null);
+          setUser(DEFAULT_GUEST_USER);
+          setActiveTab('sports');
+        }
+      });
+      return;
+    }
+
+    if (user.isLoggedIn && user.id && user.id !== 'guest') {
+      void virtualEngine.fetchUserSession(user.id).then(serverUser => {
+        if (!serverUser) {
+          setUser(DEFAULT_GUEST_USER);
+          return;
+        }
+        setUser(prev =>
+          prev.id === serverUser.id
+            ? {
+                ...prev,
+                username: serverUser.username,
+                fullName: serverUser.fullName,
+                email: serverUser.email,
+                avatar: serverUser.avatar,
+                balance: serverUser.balance,
+                phone: serverUser.phone,
+                country: serverUser.country,
+                verified: serverUser.verified,
+              }
+            : prev
+        );
+      });
+    }
   }, []);
 
   // Real-time Virtual Engine Subscriptions (low-latency sync)
@@ -216,6 +268,34 @@ export default function App() {
       }, 3500);
     });
 
+    const unsubUserUpdated = virtualEngine.onUserUpdated(updatedUser => {
+      setUser(prev => {
+        if (!prev.isLoggedIn || prev.isAdmin || prev.id !== updatedUser.id) {
+          return prev;
+        }
+        return {
+          ...prev,
+          username: updatedUser.username,
+          fullName: updatedUser.fullName,
+          email: updatedUser.email,
+          avatar: updatedUser.avatar,
+          balance: updatedUser.balance,
+          phone: updatedUser.phone,
+          country: updatedUser.country,
+          verified: updatedUser.verified,
+        };
+      });
+    });
+
+    const unsubUserDeleted = virtualEngine.onUserDeleted(deletedUserId => {
+      if (userIdRef.current === deletedUserId) {
+        if (typeof window !== 'undefined') {
+          window.localStorage.removeItem('cas9i_user_session');
+        }
+        setUser(DEFAULT_GUEST_USER);
+      }
+    });
+
     return () => {
       unsubMatches();
       unsubTipster();
@@ -226,6 +306,8 @@ export default function App() {
       unsubLeaderboard();
       unsubTicker();
       unsubGoal();
+      unsubUserUpdated();
+      unsubUserDeleted();
     };
   }, []);
 
@@ -276,11 +358,21 @@ export default function App() {
           odds: workingBet.totalOdds,
           label: workingBet.selections[0]?.matchTitle || 'Virtual Ticket'
         });
-        return { ...workingBet, status: 'WON' as const, cashoutAmount: workingBet.potentialPayout };
+        return {
+          ...workingBet,
+          status: 'WON' as const,
+          cashoutAmount: workingBet.potentialPayout,
+          settledAt: Date.now()
+        };
       }
       if (settlement === 'LOST') {
         changed = true;
-        return { ...workingBet, status: 'LOST' as const, cashoutAmount: 0 };
+        return {
+          ...workingBet,
+          status: 'LOST' as const,
+          cashoutAmount: 0,
+          settledAt: Date.now()
+        };
       }
       const currentCashout = virtualEngine.calculateCashout(workingBet);
       if (currentCashout !== workingBet.cashoutAmount) {
@@ -295,13 +387,17 @@ export default function App() {
     }
 
     if (totalNewWinnings > 0) {
+      const currentUser = userRef.current;
+      if (currentUser.isLoggedIn && !currentUser.isAdmin && currentUser.id !== 'guest') {
+        virtualEngine.syncUserBalanceDelta(currentUser.id, totalNewWinnings);
+      }
       setUser(prev => ({
         ...prev,
         balance: prev.balance + totalNewWinnings,
         totalWon: prev.totalWon + totalNewWinnings
       }));
       wonTickets.forEach(t => {
-        virtualEngine.recordUserWin(user.username, t.payout, t.odds, t.label);
+        virtualEngine.recordUserWin(currentUser.username, t.payout, t.odds, t.label);
       });
     }
   }, [matches, h2hRecords, placedBets]);
@@ -336,6 +432,7 @@ export default function App() {
         return {
           ...pos,
           settlementPrice: closePrice,
+          settledAt: now,
           status: won ? ('WON' as const) : ('LOST' as const),
         };
       });
@@ -344,13 +441,17 @@ export default function App() {
         setFxPositions(nextPositions);
       }
       if (totalFxWinnings > 0) {
+        const currentUser = userRef.current;
+        if (currentUser.isLoggedIn && !currentUser.isAdmin && currentUser.id !== 'guest') {
+          virtualEngine.syncUserBalanceDelta(currentUser.id, totalFxWinnings);
+        }
         setUser(prev => ({
           ...prev,
           balance: prev.balance + totalFxWinnings,
           totalWon: prev.totalWon + totalFxWinnings,
         }));
         fxWins.forEach(w => {
-          virtualEngine.recordUserWin(user.username, w.payout, w.odds, w.label);
+          virtualEngine.recordUserWin(currentUser.username, w.payout, w.odds, w.label);
         });
       }
     };
@@ -389,7 +490,8 @@ export default function App() {
           selection,
           odds,
           initialOdds: odds,
-          isZoom: Boolean(match.isZoom)
+          isZoom: Boolean(match.isZoom),
+          roundNumber: match.roundNumber || 1
         };
         return [...filtered, newItem];
       }
@@ -398,7 +500,15 @@ export default function App() {
 
   const handleLoadBetcode = (betcode: TipsterBetcode) => {
     soundManager.playClick();
-    setSelectedSelections(betcode.selections.map(s => ({ ...s })));
+    setSelectedSelections(
+      betcode.selections.map(s => {
+        const liveMatch = matches.find(m => m.id === s.matchId);
+        return {
+          ...s,
+          roundNumber: s.roundNumber ?? liveMatch?.roundNumber ?? 1
+        };
+      })
+    );
     setBetslipDefaultMode(betcode.selections.length >= 2 ? 'accumulator' : 'single');
     setBetslipModeSignal(prev => prev + 1);
     setIsBetslipOpen(true);
@@ -415,20 +525,41 @@ export default function App() {
   };
 
   const handlePlaceBet = (newBet: PlacedBet) => {
+    const stampedBet: PlacedBet = {
+      ...newBet,
+      selections: newBet.selections.map(s => {
+        if (typeof s.roundNumber === 'number') return s;
+        const liveMatch = matches.find(m => m.id === s.matchId);
+        return {
+          ...s,
+          roundNumber: liveMatch?.roundNumber ?? 1
+        };
+      })
+    };
+    if (user.isLoggedIn && !user.isAdmin && user.id !== 'guest') {
+      virtualEngine.syncUserBalanceDelta(user.id, -stampedBet.stake);
+    }
     setUser(prev => ({
       ...prev,
-      balance: prev.balance - newBet.stake,
+      balance: prev.balance - stampedBet.stake,
       totalBetsPlaced: prev.totalBetsPlaced + 1
     }));
-    setPlacedBets(prev => [newBet, ...prev]);
+    setPlacedBets(prev => [stampedBet, ...prev]);
   };
 
   const handleCashoutBet = (betId: string, amount: number) => {
     if (amount <= 0) return;
     const target = placedBets.find(b => b.id === betId && b.status === 'OPEN');
     if (!target || target.cashoutAmount <= 0) return;
+    if (user.isLoggedIn && !user.isAdmin && user.id !== 'guest') {
+      virtualEngine.syncUserBalanceDelta(user.id, amount);
+    }
     setPlacedBets(prev =>
-      prev.map(b => (b.id === betId ? { ...b, status: 'CASHED_OUT', cashoutAmount: amount } : b))
+      prev.map(b =>
+        b.id === betId
+          ? { ...b, status: 'CASHED_OUT', cashoutAmount: amount, settledAt: Date.now() }
+          : b
+      )
     );
     setUser(prev => ({
       ...prev,
@@ -439,6 +570,9 @@ export default function App() {
   };
 
   const handlePlaceFxPosition = (newPos: FXPosition) => {
+    if (user.isLoggedIn && !user.isAdmin && user.id !== 'guest') {
+      virtualEngine.syncUserBalanceDelta(user.id, -newPos.stake);
+    }
     setUser(prev => ({
       ...prev,
       balance: prev.balance - newPos.stake,
@@ -462,7 +596,14 @@ export default function App() {
     const commonProps = {
       userBalance: user.balance,
       onClose: () => setActiveGameModal(null),
-      onUpdateBalance: (newBalance: number) => setUser(prev => ({ ...prev, balance: newBalance })),
+      onUpdateBalance: (newBalance: number) =>
+        setUser(prev => {
+          const delta = newBalance - prev.balance;
+          if (prev.isLoggedIn && !prev.isAdmin && prev.id !== 'guest' && delta !== 0) {
+            virtualEngine.syncUserBalanceDelta(prev.id, delta);
+          }
+          return { ...prev, balance: newBalance };
+        }),
       onRecordWin: (amount: number, mult: number, game: string) =>
         handleRecordCasinoWin(amount, mult, game)
     };
@@ -474,7 +615,6 @@ export default function App() {
       case 'high-flyer':
         return <FlightAviatorGame {...commonProps} />;
       case 'shoot':
-      case 'duck-hunters':
         return <PenaltyShootGame {...commonProps} />;
       case 'plinko':
       case 'lucky-49':
@@ -482,13 +622,8 @@ export default function App() {
       case 'roulette':
         return <RouletteGame {...commonProps} />;
       case 'spin-win':
-      case 'ice-fishing':
         return <SpinWinGame {...commonProps} />;
-      case 'strike-777':
       case 'hit-slot-2025':
-      case 'burning-classics':
-      case 'gidi-slot':
-      case 'burning-coins-40':
       default:
         return <SlotsGame title={activeGameModal.title} {...commonProps} />;
     }
@@ -517,10 +652,6 @@ export default function App() {
           setIsAuthOpen(true);
         }}
         onLogout={handleLogout}
-        onOpenDeposit={() => {
-          setAuthMode('deposit');
-          setIsAuthOpen(true);
-        }}
         onOpenAdminDashboard={() => setActiveTab('admin')}
         onNavigateHome={() => setActiveTab('sports')}
         isAdminViewActive={activeTab === 'admin'}
@@ -682,6 +813,14 @@ export default function App() {
         fxPositions={fxPositions}
         fxAssets={fxAssets}
         onCashoutBet={handleCashoutBet}
+        onResetBets={() => {
+          setPlacedBets([]);
+          setFxPositions([]);
+          if (typeof window !== 'undefined') {
+            window.localStorage.removeItem('cas9i_placed_bets');
+            window.localStorage.removeItem('cas9i_fx_positions');
+          }
+        }}
       />
 
       {/* Match Detail Radar & Expanded Markets Modal */}

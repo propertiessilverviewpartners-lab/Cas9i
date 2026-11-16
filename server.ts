@@ -16,7 +16,8 @@ import type {
   H2HRecord,
   FXAsset,
   FXDuration,
-  FXPricePoint
+  FXPricePoint,
+  RegisteredUser
 } from './src/types/index.ts';
 
 const PORT = 3000;
@@ -866,6 +867,11 @@ function tickFxAssets(assets: FXAsset[], now: number): FXAsset[] {
   });
 }
 
+interface StoredUser extends RegisteredUser {
+  passwordHash: string;
+  verificationCode?: string;
+}
+
 interface PersistedStore {
   initialized: boolean;
   adminSecret: string;
@@ -875,6 +881,8 @@ interface PersistedStore {
   tipsterBetcodes: TipsterBetcode[];
   h2hRecords: H2HRecord[];
   fxAssets: FXAsset[];
+  users: StoredUser[];
+  nextUserNumericId: number;
   leaderboard: LeaderboardEntry[];
   ticker: LiveBetTickerItem[];
   lastScheduleDate?: string;
@@ -888,6 +896,40 @@ function getDeterministicAdminSecret(): string {
     .digest('hex');
 }
 
+function hashUserPassword(password: string): string {
+  return crypto
+    .createHash('sha256')
+    .update(`cas9i-user-pw-v1:${password}`)
+    .digest('hex');
+}
+
+function toPublicUser(u: StoredUser): RegisteredUser {
+  return {
+    id: u.id,
+    username: u.username,
+    fullName: u.fullName,
+    email: u.email,
+    avatar: u.avatar,
+    balance: u.balance,
+    verified: u.verified,
+    createdAt: u.createdAt,
+    phone: u.phone,
+    country: u.country,
+    city: u.city,
+    address: u.address,
+    dateOfBirth: u.dateOfBirth,
+    kycIdNumber: u.kycIdNumber,
+    accountTier: u.accountTier,
+    notes: u.notes,
+    lastDepositAt: u.lastDepositAt,
+    lastDepositAmount: u.lastDepositAmount,
+  };
+}
+
+function normalizeUserIdQuery(rawId: string): string {
+  return rawId.trim().replace(/^#/, '');
+}
+
 function createInitialStore(): PersistedStore {
   const initialLeagues: League[] = JSON.parse(JSON.stringify(INITIAL_LEAGUES));
   return {
@@ -899,6 +941,8 @@ function createInitialStore(): PersistedStore {
     tipsterBetcodes: [],
     h2hRecords: [],
     fxAssets: buildInitialFxAssets(),
+    users: [],
+    nextUserNumericId: 100001,
     leaderboard: JSON.parse(JSON.stringify(INITIAL_LEADERBOARD)),
     ticker: JSON.parse(JSON.stringify(INITIAL_TICKER)),
     lastScheduleDate: getDayKey(0),
@@ -911,6 +955,11 @@ function parseStoreFile(filePath: string): PersistedStore | null {
   const raw = fs.readFileSync(filePath, 'utf8');
   const parsed = JSON.parse(raw) as Partial<PersistedStore>;
   if (!parsed || !parsed.initialized) return null;
+  const existingUsers = Array.isArray(parsed.users) ? parsed.users : [];
+  const maxExistingNumericId = existingUsers.reduce((max, u) => {
+    const n = Number(u.id);
+    return !Number.isNaN(n) && n >= 100000 ? Math.max(max, n) : max;
+  }, 100000);
   return {
     initialized: true,
     adminSecret: getDeterministicAdminSecret(),
@@ -920,6 +969,11 @@ function parseStoreFile(filePath: string): PersistedStore | null {
     tipsterBetcodes: Array.isArray(parsed.tipsterBetcodes) ? parsed.tipsterBetcodes : [],
     h2hRecords: Array.isArray(parsed.h2hRecords) ? parsed.h2hRecords : [],
     fxAssets: Array.isArray(parsed.fxAssets) && parsed.fxAssets.length > 0 ? parsed.fxAssets : buildInitialFxAssets(),
+    users: existingUsers,
+    nextUserNumericId:
+      typeof parsed.nextUserNumericId === 'number'
+        ? Math.max(parsed.nextUserNumericId, maxExistingNumericId + 1)
+        : maxExistingNumericId + 1,
     leaderboard: Array.isArray(parsed.leaderboard) ? parsed.leaderboard : JSON.parse(JSON.stringify(INITIAL_LEADERBOARD)),
     ticker: Array.isArray(parsed.ticker) ? parsed.ticker : JSON.parse(JSON.stringify(INITIAL_TICKER)),
     lastScheduleDate: typeof parsed.lastScheduleDate === 'string' ? parsed.lastScheduleDate : undefined,
@@ -2590,6 +2644,118 @@ async function startServer() {
     return res.json({ valid: isValidAdminRequest(req) });
   });
 
+  app.post('/api/auth/register', (req, res) => {
+    const email = String(req.body?.email || '').trim().toLowerCase();
+    const username = String(req.body?.username || '').trim();
+    const fullName = String(req.body?.fullName || '').trim();
+    const password = String(req.body?.password || '');
+    const avatar = String(req.body?.avatar || '🦁').trim() || '🦁';
+
+    if (!email || !username || !fullName || !password) {
+      return res.status(400).json({ ok: false, error: 'Please complete all registration fields.' });
+    }
+    if (email === ADMIN_EMAIL) {
+      return res.status(400).json({ ok: false, error: 'This email is reserved. Please use the Login tab.' });
+    }
+    if (password.length < 4) {
+      return res.status(400).json({ ok: false, error: 'Password must be at least 4 characters.' });
+    }
+
+    const existingVerified = store.users.find(
+      u => u.verified && (u.email.toLowerCase() === email || u.username.toLowerCase() === username.toLowerCase())
+    );
+    if (existingVerified) {
+      return res.status(409).json({
+        ok: false,
+        error:
+          existingVerified.email.toLowerCase() === email
+            ? 'An account with this email is already registered.'
+            : 'This username is already taken.'
+      });
+    }
+
+    // Replace any unverified pending attempt for the same email
+    const existingPendingIdx = store.users.findIndex(u => !u.verified && u.email.toLowerCase() === email);
+    const verificationCode = String(Math.floor(100000 + Math.random() * 900000));
+
+    let assignedId: string;
+    if (existingPendingIdx !== -1) {
+      assignedId = store.users[existingPendingIdx].id;
+      store.users[existingPendingIdx] = {
+        ...store.users[existingPendingIdx],
+        username,
+        fullName,
+        email,
+        avatar,
+        passwordHash: hashUserPassword(password),
+        verificationCode,
+        createdAt: Date.now(),
+      };
+    } else {
+      assignedId = String(store.nextUserNumericId || 100001);
+      store.nextUserNumericId = Number(assignedId) + 1;
+      const pendingUser: StoredUser = {
+        id: assignedId,
+        username,
+        fullName,
+        email,
+        avatar,
+        balance: 100000,
+        verified: false,
+        createdAt: Date.now(),
+        passwordHash: hashUserPassword(password),
+        verificationCode,
+      };
+      store.users = [pendingUser, ...store.users];
+    }
+
+    saveStore(store);
+    return res.json({
+      ok: true,
+      pendingUserId: assignedId,
+      email,
+      verificationCode,
+    });
+  });
+
+  app.post('/api/auth/register/verify', (req, res) => {
+    const email = String(req.body?.email || '').trim().toLowerCase();
+    const code = String(req.body?.code || '').trim();
+    if (!email || !code) {
+      return res.status(400).json({ ok: false, error: 'Verification code is required.' });
+    }
+
+    const idx = store.users.findIndex(u => u.email.toLowerCase() === email);
+    if (idx === -1) {
+      return res.status(404).json({ ok: false, error: 'Registration record not found.' });
+    }
+
+    const target = store.users[idx];
+    if (target.verified) {
+      return res.json({ ok: true, user: toPublicUser(target) });
+    }
+
+    if (target.verificationCode !== code) {
+      return res.status(400).json({ ok: false, error: 'Invalid verification code.' });
+    }
+
+    const verifiedUser: StoredUser = {
+      ...target,
+      verified: true,
+      verificationCode: undefined,
+    };
+    store.users[idx] = verifiedUser;
+    saveStore(store);
+
+    const publicUser = toPublicUser(verifiedUser);
+    broadcast('event:users-changed', {
+      count: store.users.filter(u => u.verified).length,
+      user: publicUser
+    });
+
+    return res.json({ ok: true, user: publicUser });
+  });
+
   app.post('/api/auth/login', (req, res) => {
     const email = String(req.body?.email || '').trim().toLowerCase();
     const password = String(req.body?.password || '');
@@ -2609,7 +2775,182 @@ async function startServer() {
       return res.status(400).json({ ok: false, error: 'Please enter both email and password.' });
     }
 
-    return res.json({ ok: true, isAdmin: false });
+    const found = store.users.find(u => u.email.toLowerCase() === email);
+    if (!found) {
+      return res.status(401).json({ ok: false, error: 'No account found with this email. Please register first.' });
+    }
+    if (!found.verified) {
+      return res.status(403).json({
+        ok: false,
+        needsVerification: true,
+        error: 'Account is not verified yet. Please complete registration verification.'
+      });
+    }
+    if (found.passwordHash !== hashUserPassword(password)) {
+      return res.status(401).json({ ok: false, error: 'Invalid email or password.' });
+    }
+
+    return res.json({ ok: true, isAdmin: false, user: toPublicUser(found) });
+  });
+
+  app.get('/api/auth/session/:id', (req, res) => {
+    const cleanId = normalizeUserIdQuery(req.params.id || '');
+    const found = store.users.find(u => u.id === cleanId && u.verified);
+    if (!found) {
+      return res.status(404).json({ ok: false, error: 'User not found.' });
+    }
+    return res.json({ ok: true, user: toPublicUser(found) });
+  });
+
+  app.post('/api/auth/session/:id/balance', (req, res) => {
+    const cleanId = normalizeUserIdQuery(req.params.id || '');
+    const delta = Number(req.body?.delta);
+    if (!Number.isFinite(delta)) {
+      return res.status(400).json({ ok: false, error: 'Invalid balance delta.' });
+    }
+    const idx = store.users.findIndex(u => u.id === cleanId && u.verified);
+    if (idx === -1) {
+      return res.status(404).json({ ok: false, error: 'User not found.' });
+    }
+    const updatedBalance = Math.max(0, Math.round((store.users[idx].balance + delta) * 100) / 100);
+    store.users[idx] = {
+      ...store.users[idx],
+      balance: updatedBalance,
+    };
+    saveStore(store);
+    const publicUser = toPublicUser(store.users[idx]);
+    broadcast('event:users-changed', { count: store.users.filter(u => u.verified).length, user: publicUser });
+    return res.json({ ok: true, user: publicUser });
+  });
+
+  // Admin: List Verified Registered Users
+  app.get('/api/admin/users', (req, res) => {
+    if (!isValidAdminRequest(req)) {
+      return res.status(403).json({ error: 'Admin authorization required.' });
+    }
+    const verifiedUsers = store.users
+      .filter(u => u.verified)
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .map(toPublicUser);
+    return res.json({ users: verifiedUsers });
+  });
+
+  // Admin: Search User by ID Number (exact ID match)
+  app.get('/api/admin/users/lookup', (req, res) => {
+    if (!isValidAdminRequest(req)) {
+      return res.status(403).json({ error: 'Admin authorization required.' });
+    }
+    const cleanId = normalizeUserIdQuery(String(req.query?.id || ''));
+    if (!cleanId) {
+      return res.status(400).json({ ok: false, error: 'error' });
+    }
+    const found = store.users.find(u => u.verified && u.id === cleanId);
+    if (!found || !found.fullName || !found.fullName.trim()) {
+      return res.status(404).json({ ok: false, error: 'error' });
+    }
+    return res.json({ ok: true, user: toPublicUser(found) });
+  });
+
+  // Admin: Update User Info
+  app.put('/api/admin/users/:id', (req, res) => {
+    if (!isValidAdminRequest(req)) {
+      return res.status(403).json({ error: 'Admin authorization required.' });
+    }
+    const cleanId = normalizeUserIdQuery(req.params.id || '');
+    const idx = store.users.findIndex(u => u.verified && u.id === cleanId);
+    if (idx === -1) {
+      return res.status(404).json({ ok: false, error: 'User not found.' });
+    }
+
+    const current = store.users[idx];
+    const body = req.body || {};
+    const nextUsername = typeof body.username === 'string' && body.username.trim() ? body.username.trim() : current.username;
+    const nextFullName = typeof body.fullName === 'string' && body.fullName.trim() ? body.fullName.trim() : current.fullName;
+    const nextEmail = typeof body.email === 'string' && body.email.trim() ? body.email.trim().toLowerCase() : current.email;
+
+    const updatedUser: StoredUser = {
+      ...current,
+      username: nextUsername,
+      fullName: nextFullName,
+      email: nextEmail,
+      avatar: typeof body.avatar === 'string' && body.avatar.trim() ? body.avatar.trim() : current.avatar,
+      phone: typeof body.phone === 'string' ? body.phone.trim() : current.phone,
+      country: typeof body.country === 'string' ? body.country.trim() : current.country,
+      city: typeof body.city === 'string' ? body.city.trim() : current.city,
+      address: typeof body.address === 'string' ? body.address.trim() : current.address,
+      dateOfBirth: typeof body.dateOfBirth === 'string' ? body.dateOfBirth.trim() : current.dateOfBirth,
+      kycIdNumber: typeof body.kycIdNumber === 'string' ? body.kycIdNumber.trim() : current.kycIdNumber,
+      accountTier:
+        body.accountTier === 'VIP' || body.accountTier === 'Suspended' || body.accountTier === 'Standard'
+          ? body.accountTier
+          : current.accountTier,
+      notes: typeof body.notes === 'string' ? body.notes.trim() : current.notes,
+    };
+
+    store.users[idx] = updatedUser;
+    saveStore(store);
+
+    const publicUser = toPublicUser(updatedUser);
+    const verifiedUsers = store.users.filter(u => u.verified).sort((a, b) => b.createdAt - a.createdAt).map(toPublicUser);
+    broadcast('event:user-updated', publicUser);
+    broadcast('event:users-changed', { count: verifiedUsers.length });
+
+    return res.json({ ok: true, user: publicUser, users: verifiedUsers });
+  });
+
+  // Admin: Delete User Permanently
+  app.delete('/api/admin/users/:id', (req, res) => {
+    if (!isValidAdminRequest(req)) {
+      return res.status(403).json({ error: 'Admin authorization required.' });
+    }
+    const cleanId = normalizeUserIdQuery(req.params.id || '');
+    const before = store.users.length;
+    store.users = store.users.filter(u => u.id !== cleanId);
+    if (store.users.length !== before) {
+      saveStore(store);
+      const verifiedUsers = store.users.filter(u => u.verified).sort((a, b) => b.createdAt - a.createdAt).map(toPublicUser);
+      broadcast('event:user-deleted', { userId: cleanId });
+      broadcast('event:users-changed', { count: verifiedUsers.length });
+      return res.json({ ok: true, users: verifiedUsers });
+    }
+    return res.status(404).json({ ok: false, error: 'User not found.' });
+  });
+
+  // Admin: Lodge Deposit to User by ID
+  app.post('/api/admin/users/:id/deposit', (req, res) => {
+    if (!isValidAdminRequest(req)) {
+      return res.status(403).json({ error: 'Admin authorization required.' });
+    }
+    const cleanId = normalizeUserIdQuery(req.params.id || '');
+    const amount = Number(req.body?.amount);
+    const idx = store.users.findIndex(u => u.verified && u.id === cleanId);
+    if (idx === -1) {
+      return res.status(404).json({ ok: false, error: 'error' });
+    }
+    const target = store.users[idx];
+    if (!target.fullName || !target.fullName.trim()) {
+      return res.status(404).json({ ok: false, error: 'error' });
+    }
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return res.status(400).json({ ok: false, error: 'Please enter a valid deposit amount.' });
+    }
+
+    const nextBalance = Math.round((target.balance + amount) * 100) / 100;
+    const updatedUser: StoredUser = {
+      ...target,
+      balance: nextBalance,
+      lastDepositAt: Date.now(),
+      lastDepositAmount: amount,
+    };
+    store.users[idx] = updatedUser;
+    saveStore(store);
+
+    const publicUser = toPublicUser(updatedUser);
+    const verifiedUsers = store.users.filter(u => u.verified).sort((a, b) => b.createdAt - a.createdAt).map(toPublicUser);
+    broadcast('event:user-updated', publicUser);
+    broadcast('event:users-changed', { count: verifiedUsers.length });
+
+    return res.json({ ok: true, user: publicUser, users: verifiedUsers, depositedAmount: amount });
   });
 
   // Admin: Create Permanent Club

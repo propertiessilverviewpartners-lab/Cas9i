@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { UserProfile } from '../types';
-import { X, DollarSign, RotateCcw, Check, Lock, Mail, User } from 'lucide-react';
+import { X, DollarSign, RotateCcw, Check, Lock, Mail, User, ShieldCheck, KeyRound } from 'lucide-react';
 import { soundManager } from '../services/soundEffects';
 import { virtualEngine } from '../services/virtualEngine';
 
@@ -27,14 +27,25 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [emailInput, setEmailInput] = useState('');
   const [passwordInput, setPasswordInput] = useState('');
   const [usernameInput, setUsernameInput] = useState('');
+  const [fullNameInput, setFullNameInput] = useState('');
   const [selectedAvatar, setSelectedAvatar] = useState('🦁');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [depositSuccess, setDepositSuccess] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Registration verification step state
+  const [registerStep, setRegisterStep] = useState<'form' | 'verify'>('form');
+  const [pendingEmail, setPendingEmail] = useState('');
+  const [pendingUserId, setPendingUserId] = useState('');
+  const [generatedCode, setGeneratedCode] = useState('');
+  const [verificationCodeInput, setVerificationCodeInput] = useState('');
 
   useEffect(() => {
     if (isOpen) {
       setMode(initialMode);
       setErrorMsg(null);
+      setRegisterStep('form');
+      setVerificationCodeInput('');
     }
   }, [isOpen, initialMode]);
 
@@ -44,6 +55,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
     setErrorMsg(null);
 
     const normalizedEmail = emailInput.trim().toLowerCase();
@@ -52,10 +64,15 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       return;
     }
 
+    setIsSubmitting(true);
     try {
       const result = await virtualEngine.login(normalizedEmail, passwordInput);
       if (!result.ok) {
-        setErrorMsg(result.error || 'Invalid credentials.');
+        if (result.needsVerification) {
+          setErrorMsg(result.error || 'Account pending verification. Complete verification in Register.');
+        } else {
+          setErrorMsg(result.error || 'Invalid credentials.');
+        }
         return;
       }
 
@@ -65,34 +82,47 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           id: 'admin-cas9i',
           email: ADMIN_EMAIL,
           username: 'Admin',
+          fullName: 'CAS9i Admin',
           avatar: '🛡️',
           isLoggedIn: true,
-          isAdmin: true
+          isAdmin: true,
+          verified: true
         });
         onClose();
         if (onAdminLoginSuccess) onAdminLoginSuccess();
         return;
       }
 
-      // Standard player login
-      soundManager.playBetPlaced();
-      const derivedName = normalizedEmail.split('@')[0] || 'Player';
-      onUpdateUser({
-        id: `user-${Date.now()}`,
-        email: normalizedEmail,
-        username: derivedName,
-        avatar: selectedAvatar,
-        isLoggedIn: true,
-        isAdmin: false
-      });
-      onClose();
+      if (result.user) {
+        soundManager.playBetPlaced();
+        onUpdateUser({
+          id: result.user.id,
+          email: result.user.email,
+          username: result.user.username,
+          fullName: result.user.fullName,
+          avatar: result.user.avatar || selectedAvatar,
+          balance: result.user.balance,
+          phone: result.user.phone,
+          country: result.user.country,
+          verified: result.user.verified,
+          isLoggedIn: true,
+          isAdmin: false
+        });
+        onClose();
+        return;
+      }
+
+      setErrorMsg('Unable to load account profile.');
     } catch {
       setErrorMsg('Unable to reach server. Please try again.');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
-  const handleRegisterSubmit = (e: React.FormEvent) => {
+  const handleRegisterSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
     setErrorMsg(null);
 
     const normalizedEmail = emailInput.trim().toLowerCase();
@@ -100,28 +130,93 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       setErrorMsg('This email is reserved. Please use the Login tab.');
       return;
     }
-    if (!normalizedEmail || !passwordInput || !usernameInput.trim()) {
-      setErrorMsg('Please complete all registration fields.');
+    if (!usernameInput.trim() || !fullNameInput.trim() || !normalizedEmail || !passwordInput) {
+      setErrorMsg('Please complete all registration fields including Full Name.');
+      return;
+    }
+    if (passwordInput.length < 4) {
+      setErrorMsg('Password must be at least 4 characters.');
       return;
     }
 
-    soundManager.playBetPlaced();
-    onUpdateUser({
-      id: `user-${Date.now()}`,
-      email: normalizedEmail,
-      username: usernameInput.trim(),
-      avatar: selectedAvatar,
-      isLoggedIn: true,
-      isAdmin: false,
-      balance: user.balance >= 30000 ? user.balance : 100000
-    });
-    onClose();
+    setIsSubmitting(true);
+    try {
+      const res = await virtualEngine.registerUser({
+        username: usernameInput.trim(),
+        fullName: fullNameInput.trim(),
+        email: normalizedEmail,
+        password: passwordInput,
+        avatar: selectedAvatar
+      });
+
+      if (!res.ok) {
+        setErrorMsg(res.error || 'Registration failed.');
+        return;
+      }
+
+      soundManager.playClick();
+      setPendingEmail(res.email || normalizedEmail);
+      setPendingUserId(res.pendingUserId || '');
+      setGeneratedCode(res.verificationCode || '');
+      setVerificationCodeInput(res.verificationCode || '');
+      setRegisterStep('verify');
+    } catch {
+      setErrorMsg('Unable to reach server. Please try again.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleVerifyRegistration = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isSubmitting) return;
+    setErrorMsg(null);
+
+    if (!verificationCodeInput.trim()) {
+      setErrorMsg('Please enter the 6-digit verification code.');
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const res = await virtualEngine.verifyRegistration(pendingEmail, verificationCodeInput.trim());
+      if (!res.ok || !res.user) {
+        setErrorMsg(res.error || 'Invalid verification code.');
+        return;
+      }
+
+      soundManager.playBetPlaced();
+      onUpdateUser({
+        id: res.user.id,
+        email: res.user.email,
+        username: res.user.username,
+        fullName: res.user.fullName,
+        avatar: res.user.avatar,
+        balance: res.user.balance,
+        verified: res.user.verified,
+        isLoggedIn: true,
+        isAdmin: false
+      });
+
+      setRegisterStep('form');
+      setPasswordInput('');
+      setVerificationCodeInput('');
+      onClose();
+    } catch {
+      setErrorMsg('Verification failed. Please try again.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const handleDeposit = (amount: number) => {
     soundManager.playBetPlaced();
+    const nextBalance = user.balance + amount;
+    if (user.isLoggedIn && !user.isAdmin && user.id && user.id !== 'guest') {
+      virtualEngine.syncUserBalanceDelta(user.id, amount);
+    }
     onUpdateUser({
-      balance: user.balance + amount
+      balance: nextBalance
     });
     setDepositSuccess(true);
     setTimeout(() => {
@@ -132,6 +227,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
   const handleReset = () => {
     soundManager.playClick();
+    const delta = 100000 - user.balance;
+    if (user.isLoggedIn && !user.isAdmin && user.id && user.id !== 'guest' && delta !== 0) {
+      virtualEngine.syncUserBalanceDelta(user.id, delta);
+    }
     onUpdateUser({
       balance: 100000
     });
@@ -147,13 +246,22 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             <span className="text-xl">
               {mode === 'deposit' ? '💰' : mode === 'register' ? '⭐' : '🔐'}
             </span>
-            <h3 className="text-sm sm:text-base font-black text-white tracking-wide">
-              {mode === 'deposit'
-                ? 'QUICK TOP-UP / DEPOSIT'
-                : mode === 'register'
-                ? 'CREATE CAS9i ACCOUNT'
-                : 'LOGIN TO CAS9i'}
-            </h3>
+            <div>
+              <h3 className="text-sm sm:text-base font-black text-white tracking-wide">
+                {mode === 'deposit'
+                  ? 'QUICK TOP-UP / DEPOSIT'
+                  : mode === 'register'
+                  ? registerStep === 'verify'
+                    ? 'VERIFY YOUR ACCOUNT'
+                    : 'CREATE CAS9i ACCOUNT'
+                  : 'LOGIN TO CAS9i'}
+              </h3>
+              {user.isLoggedIn && !user.isAdmin && user.id !== 'guest' && (
+                <span className="text-[11px] font-mono font-bold text-[#00e700] block tabular-nums">
+                  Player ID: #{user.id} {user.fullName ? `· ${user.fullName}` : ''}
+                </span>
+              )}
+            </div>
           </div>
 
           <button
@@ -172,7 +280,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               setErrorMsg(null);
               setMode('login');
             }}
-            className={`flex-1 py-1.5 rounded-lg text-xs font-black transition-all ${
+            className={`flex-1 py-1.5 rounded-lg text-xs font-black transition-all whitespace-nowrap ${
               mode === 'login' ? 'bg-[#00ad3a] text-white shadow-sm' : 'text-zinc-400 hover:text-white'
             }`}
           >
@@ -184,7 +292,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               setErrorMsg(null);
               setMode('register');
             }}
-            className={`flex-1 py-1.5 rounded-lg text-xs font-black transition-all ${
+            className={`flex-1 py-1.5 rounded-lg text-xs font-black transition-all whitespace-nowrap ${
               mode === 'register' ? 'bg-[#00ad3a] text-white shadow-sm' : 'text-zinc-400 hover:text-white'
             }`}
           >
@@ -197,7 +305,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 setErrorMsg(null);
                 setMode('deposit');
               }}
-              className={`flex-1 py-1.5 rounded-lg text-xs font-black transition-all ${
+              className={`flex-1 py-1.5 rounded-lg text-xs font-black transition-all whitespace-nowrap ${
                 mode === 'deposit' ? 'bg-[#00ad3a] text-white shadow-sm' : 'text-zinc-400 hover:text-white'
               }`}
             >
@@ -221,6 +329,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 <span className="text-3xl font-black text-[#00e700] tabular-nums">
                   ${user.balance.toFixed(2)}
                 </span>
+                {!user.isAdmin && user.id !== 'guest' && (
+                  <span className="text-xs font-mono font-bold text-zinc-300 mt-1 block tabular-nums">
+                    Your Deposit ID: <span className="text-[#00e700]">#{user.id}</span>
+                  </span>
+                )}
               </div>
 
               {depositSuccess ? (
@@ -236,7 +349,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                       <button
                         key={amt}
                         onClick={() => handleDeposit(amt)}
-                        className="py-2.5 rounded-xl bg-[#062416] hover:bg-[#00ad3a] border border-[#00e700]/30 hover:border-[#00e700] text-white hover:text-black font-black text-xs sm:text-sm transition-all shadow-sm active:scale-95 flex items-center justify-center gap-0.5"
+                        className="py-2.5 rounded-xl bg-[#062416] hover:bg-[#00ad3a] border border-[#00e700]/30 hover:border-[#00e700] text-white hover:text-black font-black text-xs sm:text-sm transition-all shadow-sm active:scale-95 flex items-center justify-center gap-0.5 tabular-nums"
                       >
                         <DollarSign className="w-3.5 h-3.5" />
                         <span>+{amt >= 1000000 ? '1M' : `${amt / 1000}k`}</span>
@@ -288,10 +401,68 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
               <button
                 type="submit"
-                className="w-full h-11 rounded-xl bg-gradient-to-r from-[#00ad3a] to-[#00e700] text-black font-black text-sm uppercase tracking-wider shadow-[0_0_20px_rgba(0,231,0,0.4)] hover:brightness-110 active:scale-95 transition-all mt-2"
+                disabled={isSubmitting}
+                className="w-full h-11 rounded-xl bg-gradient-to-r from-[#00ad3a] to-[#00e700] text-black font-black text-sm uppercase tracking-wider shadow-[0_0_20px_rgba(0,231,0,0.4)] hover:brightness-110 active:scale-95 transition-all mt-2 disabled:opacity-50"
               >
-                Login
+                {isSubmitting ? 'Signing In...' : 'Login'}
               </button>
+            </form>
+          ) : registerStep === 'verify' ? (
+            <form onSubmit={handleVerifyRegistration} className="space-y-3.5">
+              <div className="bg-[#062416] border border-[#00e700]/30 rounded-xl p-3 space-y-1.5">
+                <div className="flex items-center gap-2 text-[#00e700] text-xs font-black">
+                  <ShieldCheck className="w-4 h-4 shrink-0" />
+                  <span>Account Created — Verification Required</span>
+                </div>
+                <p className="text-xs text-zinc-300">
+                  Assigned ID: <span className="font-mono font-black text-white tabular-nums">#{pendingUserId}</span> · {pendingEmail}
+                </p>
+                {generatedCode && (
+                  <div className="bg-[#03150b] border border-[#00e700]/25 rounded-lg px-3 py-2 flex items-center justify-between text-xs">
+                    <span className="text-zinc-400 font-bold">Verification Code:</span>
+                    <span className="font-mono font-black text-sm text-[#00e700] tracking-widest tabular-nums">
+                      {generatedCode}
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              <div>
+                <label className="text-xs text-zinc-400 font-bold block mb-1">Enter 6-Digit Verification Code</label>
+                <div className="relative">
+                  <KeyRound className="w-4 h-4 text-zinc-500 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    required
+                    maxLength={6}
+                    value={verificationCodeInput}
+                    onChange={e => setVerificationCodeInput(e.target.value)}
+                    placeholder="6-digit code"
+                    className="w-full bg-[#062416] border border-[#00e700]/30 rounded-xl pl-9 pr-3 py-2.5 text-sm font-mono font-black text-white tracking-widest focus:outline-none focus:border-[#00e700]"
+                  />
+                </div>
+              </div>
+
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    soundManager.playClick();
+                    setErrorMsg(null);
+                    setRegisterStep('form');
+                  }}
+                  className="h-11 px-4 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-bold text-xs whitespace-nowrap"
+                >
+                  Back
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSubmitting}
+                  className="flex-1 h-11 rounded-xl bg-gradient-to-r from-[#00ad3a] to-[#00e700] text-black font-black text-xs sm:text-sm uppercase tracking-wider shadow-[0_0_20px_rgba(0,231,0,0.4)] hover:brightness-110 active:scale-95 transition-all disabled:opacity-50"
+                >
+                  {isSubmitting ? 'Verifying...' : 'Verify & Activate Account'}
+                </button>
+              </div>
             </form>
           ) : (
             <form onSubmit={handleRegisterSubmit} className="space-y-3">
@@ -318,18 +489,35 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 </div>
               </div>
 
-              <div>
-                <label className="text-xs text-zinc-400 font-bold block mb-1">Username</label>
-                <div className="relative">
-                  <User className="w-4 h-4 text-zinc-500 absolute left-3 top-1/2 -translate-y-1/2" />
-                  <input
-                    type="text"
-                    required
-                    value={usernameInput}
-                    onChange={e => setUsernameInput(e.target.value)}
-                    placeholder="e.g. ApexPlayer"
-                    className="w-full bg-[#062416] border border-[#00e700]/30 rounded-xl pl-9 pr-3 py-2 text-sm font-bold text-white focus:outline-none focus:border-[#00e700]"
-                  />
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                <div>
+                  <label className="text-xs text-zinc-400 font-bold block mb-1">Full Name</label>
+                  <div className="relative">
+                    <User className="w-4 h-4 text-zinc-500 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      required
+                      value={fullNameInput}
+                      onChange={e => setFullNameInput(e.target.value)}
+                      placeholder="e.g. John Doe"
+                      className="w-full bg-[#062416] border border-[#00e700]/30 rounded-xl pl-9 pr-3 py-2 text-sm font-bold text-white focus:outline-none focus:border-[#00e700]"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-xs text-zinc-400 font-bold block mb-1">Username</label>
+                  <div className="relative">
+                    <User className="w-4 h-4 text-zinc-500 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      required
+                      value={usernameInput}
+                      onChange={e => setUsernameInput(e.target.value)}
+                      placeholder="e.g. ApexPlayer"
+                      className="w-full bg-[#062416] border border-[#00e700]/30 rounded-xl pl-9 pr-3 py-2 text-sm font-bold text-white focus:outline-none focus:border-[#00e700]"
+                    />
+                  </div>
                 </div>
               </div>
 
@@ -365,9 +553,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
               <button
                 type="submit"
-                className="w-full h-11 rounded-xl bg-gradient-to-r from-[#00ad3a] to-[#00e700] text-black font-black text-sm uppercase tracking-wider shadow-[0_0_20px_rgba(0,231,0,0.4)] hover:brightness-110 active:scale-95 transition-all mt-1"
+                disabled={isSubmitting}
+                className="w-full h-11 rounded-xl bg-gradient-to-r from-[#00ad3a] to-[#00e700] text-black font-black text-sm uppercase tracking-wider shadow-[0_0_20px_rgba(0,231,0,0.4)] hover:brightness-110 active:scale-95 transition-all mt-1 disabled:opacity-50"
               >
-                Complete Registration
+                {isSubmitting ? 'Creating Account...' : 'Continue to Verification'}
               </button>
             </form>
           )}
