@@ -19,7 +19,8 @@ import type {
   FXPricePoint,
   FXPosition,
   PlacedBet,
-  RegisteredUser
+  RegisteredUser,
+  DtmMatchRule
 } from './src/types/index.ts';
 
 const PORT = 3000;
@@ -893,6 +894,7 @@ interface PersistedStore {
   ticker: LiveBetTickerItem[];
   lastScheduleDate?: string;
   scheduleWaveVersion?: number;
+  dtmRules?: DtmMatchRule[];
 }
 
 function getDeterministicAdminSecret(): string {
@@ -959,6 +961,7 @@ function createInitialStore(): PersistedStore {
     ticker: JSON.parse(JSON.stringify(INITIAL_TICKER)),
     lastScheduleDate: getDayKey(0),
     scheduleWaveVersion: 2,
+    dtmRules: [],
   };
 }
 
@@ -1005,6 +1008,7 @@ function parseStoreFile(filePath: string): PersistedStore | null {
     ticker: Array.isArray(parsed.ticker) ? parsed.ticker : JSON.parse(JSON.stringify(INITIAL_TICKER)),
     lastScheduleDate: typeof parsed.lastScheduleDate === 'string' ? parsed.lastScheduleDate : undefined,
     scheduleWaveVersion: typeof parsed.scheduleWaveVersion === 'number' ? parsed.scheduleWaveVersion : 1,
+    dtmRules: Array.isArray(parsed.dtmRules) ? parsed.dtmRules : [],
   };
   if (needsResetV3) {
     saveStore(storeObj);
@@ -1070,6 +1074,7 @@ const sliceVersions = {
   leaderboard: stateVersion,
   ticker: stateVersion,
   users: stateVersion,
+  dtm: stateVersion,
 };
 
 let cachedFirebaseApiKey: string | null = null;
@@ -1673,6 +1678,438 @@ function normalizeMatchShape(m: VirtualMatch): VirtualMatch {
     matchDate: m.matchDate || getDayKey(0),
     odds: mergedOdds,
   };
+}
+
+interface DtmTargetPlan {
+  cacheKey: string;
+  htHome: number;
+  htAway: number;
+  ftHome: number;
+  ftAway: number;
+  firstGoalTeam: 'home' | 'away';
+  fiveMinGoal?: 'Yes' | 'No' | 'Over 5 Goals';
+}
+
+const dtmPlanCache = new Map<string, DtmTargetPlan>();
+
+function sanitizeDtmRuleId(raw: string): string {
+  const cleaned = raw.trim().replace(/^#/, '').replace(/[^a-zA-Z0-9_-]/g, '-');
+  return (cleaned || `dtm-${Date.now()}`).slice(0, 128);
+}
+
+function normalizeDtmRule(raw: Partial<DtmMatchRule> | undefined, existing?: DtmMatchRule): DtmMatchRule | null {
+  if (!raw) return null;
+  const matchId = String(raw.matchId ?? existing?.matchId ?? '').trim().slice(0, 128);
+  const homeTeam = String(raw.homeTeam ?? existing?.homeTeam ?? '').trim().slice(0, 100);
+  const awayTeam = String(raw.awayTeam ?? existing?.awayTeam ?? '').trim().slice(0, 100);
+  if (!matchId || !homeTeam || !awayTeam) return null;
+
+  const id = sanitizeDtmRuleId(String(raw.id || existing?.id || `dtm-${matchId}`));
+  const league = String(raw.league ?? existing?.league ?? 'Virtual League').trim().slice(0, 120) || 'Virtual League';
+  const enabled = typeof raw.enabled === 'boolean' ? raw.enabled : existing?.enabled ?? true;
+
+  const winner1X2 =
+    raw.winner1X2 === 'Home & O15' || raw.winner1X2 === 'Draw' || raw.winner1X2 === 'Away & O15'
+      ? raw.winner1X2
+      : undefined;
+  const firstGoal = raw.firstGoal === 'Home' || raw.firstGoal === 'Away' ? raw.firstGoal : undefined;
+  const fiveMinGoal =
+    raw.fiveMinGoal === 'Yes' || raw.fiveMinGoal === 'No' || raw.fiveMinGoal === 'Over 5 Goals'
+      ? raw.fiveMinGoal
+      : undefined;
+  const oddEven = raw.oddEven === 'Odd' || raw.oddEven === 'Even' ? raw.oddEven : undefined;
+  const firstHalf =
+    raw.firstHalf === 'Home & O10' || raw.firstHalf === 'X & O10' || raw.firstHalf === 'Away & O10'
+      ? raw.firstHalf
+      : undefined;
+  const firstHalfOU15 =
+    raw.firstHalfOU15 === 'Over 15' || raw.firstHalfOU15 === 'Under 15' ? raw.firstHalfOU15 : undefined;
+  const secondHalf =
+    raw.secondHalf === 'Home & O15' || raw.secondHalf === 'X & O15' || raw.secondHalf === 'Away & O15'
+      ? raw.secondHalf
+      : undefined;
+
+  const rawOuLine = Number(raw.overUnderLine);
+  const overUnderLine =
+    Number.isFinite(rawOuLine) && rawOuLine >= 15 && rawOuLine <= 30 ? Math.floor(rawOuLine) : undefined;
+  const overUnderPick =
+    overUnderLine !== undefined && (raw.overUnderPick === 'Over' || raw.overUnderPick === 'Under')
+      ? raw.overUnderPick
+      : undefined;
+  const rawOuGoals = Number(raw.overUnderTargetGoals);
+  const overUnderTargetGoals =
+    typeof raw.overUnderTargetGoals === 'number' && Number.isFinite(rawOuGoals)
+      ? Math.max(0, Math.min(99, Math.floor(rawOuGoals)))
+      : undefined;
+
+  const rawCsH = raw.correctScoreHome;
+  const rawCsA = raw.correctScoreAway;
+  const hasCs =
+    typeof rawCsH === 'number' &&
+    Number.isFinite(rawCsH) &&
+    typeof rawCsA === 'number' &&
+    Number.isFinite(rawCsA);
+  const correctScoreHome = hasCs ? Math.max(0, Math.min(99, Math.floor(rawCsH))) : undefined;
+  const correctScoreAway = hasCs ? Math.max(0, Math.min(99, Math.floor(rawCsA))) : undefined;
+
+  return {
+    id,
+    matchId,
+    homeTeam,
+    awayTeam,
+    league,
+    enabled,
+    winner1X2,
+    firstGoal,
+    fiveMinGoal,
+    oddEven,
+    firstHalf,
+    firstHalfOU15,
+    secondHalf,
+    overUnderLine: overUnderPick ? overUnderLine : undefined,
+    overUnderPick,
+    overUnderTargetGoals,
+    correctScoreHome,
+    correctScoreAway,
+    updatedAtMs: typeof raw.updatedAtMs === 'number' && raw.updatedAtMs > 0 ? raw.updatedAtMs : Date.now(),
+  };
+}
+
+function findActiveDtmRuleForMatch(match: VirtualMatch): DtmMatchRule | undefined {
+  const rules = Array.isArray(store.dtmRules) ? store.dtmRules : [];
+  if (rules.length === 0) return undefined;
+  const byId = rules.find(r => r.enabled && r.matchId === match.id);
+  if (byId) return byId;
+  const hNorm = match.homeTeam.trim().toLowerCase();
+  const aNorm = match.awayTeam.trim().toLowerCase();
+  return rules.find(
+    r => r.enabled && r.homeTeam.trim().toLowerCase() === hNorm && r.awayTeam.trim().toLowerCase() === aNorm
+  );
+}
+
+function clearDtmPlanCacheForRule(rule?: DtmMatchRule) {
+  if (!rule) {
+    dtmPlanCache.clear();
+    return;
+  }
+  const hNorm = rule.homeTeam.trim().toLowerCase();
+  const aNorm = rule.awayTeam.trim().toLowerCase();
+  for (const key of dtmPlanCache.keys()) {
+    if (key.startsWith(`${rule.matchId}:`) || key.includes(`:${hNorm}:${aNorm}:`)) {
+      dtmPlanCache.delete(key);
+    }
+  }
+}
+
+function buildDtmTargetPlan(match: VirtualMatch, rule: DtmMatchRule, cacheKey: string): DtmTargetPlan {
+  const hasExplicitCS =
+    typeof rule.correctScoreHome === 'number' && typeof rule.correctScoreAway === 'number';
+
+  let ftHome = 10;
+  let ftAway = 8;
+
+  if (hasExplicitCS) {
+    ftHome = Math.max(0, Math.min(99, rule.correctScoreHome!));
+    ftAway = Math.max(0, Math.min(99, rule.correctScoreAway!));
+  } else {
+    let minTotal = 0;
+    let maxTotal = 60;
+
+    if (rule.overUnderLine !== undefined && rule.overUnderPick) {
+      if (rule.overUnderPick === 'Over') {
+        minTotal = Math.max(minTotal, rule.overUnderLine + 1);
+      } else {
+        maxTotal = Math.min(maxTotal, Math.max(0, rule.overUnderLine - 1));
+      }
+    }
+    if (rule.fiveMinGoal === 'Over 5 Goals') {
+      minTotal = Math.max(minTotal, 6);
+    }
+    if (rule.winner1X2 === 'Home & O15' || rule.winner1X2 === 'Away & O15') {
+      if (maxTotal >= 16) minTotal = Math.max(minTotal, 16);
+    }
+    if (rule.firstHalfOU15 === 'Over 15' && maxTotal >= 16) {
+      minTotal = Math.max(minTotal, 17);
+    }
+    if (rule.firstHalf && maxTotal >= 11) {
+      minTotal = Math.max(minTotal, 12);
+    }
+    if (rule.secondHalf && maxTotal >= 16) {
+      const htNeed = rule.firstHalf ? 11 : 2;
+      if (maxTotal >= 16 + htNeed) {
+        minTotal = Math.max(minTotal, 16 + htNeed);
+      } else {
+        minTotal = Math.max(minTotal, 16);
+      }
+    }
+    if (rule.firstGoal && maxTotal >= 1) {
+      minTotal = Math.max(minTotal, 1);
+    }
+    if (rule.fiveMinGoal === 'Yes' && maxTotal >= 1) {
+      minTotal = Math.max(minTotal, 1);
+    }
+
+    let targetTotal =
+      typeof rule.overUnderTargetGoals === 'number'
+        ? rule.overUnderTargetGoals
+        : Math.max(18, minTotal);
+
+    targetTotal = Math.max(minTotal, Math.min(maxTotal, targetTotal));
+
+    const needsEven = rule.winner1X2 === 'Draw' || rule.oddEven === 'Even';
+    const needsOdd = rule.oddEven === 'Odd' && rule.winner1X2 !== 'Draw';
+
+    if (needsEven && targetTotal % 2 !== 0) {
+      if (targetTotal + 1 <= maxTotal) targetTotal += 1;
+      else if (targetTotal - 1 >= minTotal) targetTotal -= 1;
+    } else if (needsOdd && targetTotal % 2 === 0) {
+      if (targetTotal + 1 <= maxTotal) targetTotal += 1;
+      else if (targetTotal - 1 >= minTotal) targetTotal -= 1;
+    }
+
+    if (rule.winner1X2 === 'Draw') {
+      ftHome = Math.floor(targetTotal / 2);
+      ftAway = ftHome;
+    } else if (rule.winner1X2 === 'Home & O15') {
+      if (targetTotal <= 0) targetTotal = 1;
+      ftAway = Math.floor((targetTotal - 1) / 2);
+      ftHome = targetTotal - ftAway;
+      if (ftHome <= ftAway) ftHome = ftAway + 1;
+    } else if (rule.winner1X2 === 'Away & O15') {
+      if (targetTotal <= 0) targetTotal = 1;
+      ftHome = Math.floor((targetTotal - 1) / 2);
+      ftAway = targetTotal - ftHome;
+      if (ftAway <= ftHome) ftAway = ftHome + 1;
+    } else {
+      const homeBias =
+        rule.firstHalf === 'Home & O10' || rule.secondHalf === 'Home & O15' || rule.firstGoal === 'Home'
+          ? 0.56
+          : rule.firstHalf === 'Away & O10' || rule.secondHalf === 'Away & O15' || rule.firstGoal === 'Away'
+          ? 0.44
+          : 0.52;
+      ftHome = Math.round(targetTotal * homeBias);
+      ftAway = Math.max(0, targetTotal - ftHome);
+    }
+  }
+
+  // Ensure live scores aren't decreased below already-scored goals
+  const curH = match.homeScore || 0;
+  const curA = match.awayScore || 0;
+  if (!hasExplicitCS) {
+    if (ftHome < curH) ftHome = curH;
+    if (ftAway < curA) ftAway = curA;
+    if (rule.winner1X2 === 'Draw' && ftHome !== ftAway) {
+      const eq = Math.max(ftHome, ftAway);
+      ftHome = eq;
+      ftAway = eq;
+    } else if (rule.winner1X2 === 'Home & O15' && ftHome <= ftAway) {
+      ftHome = ftAway + 1;
+    } else if (rule.winner1X2 === 'Away & O15' && ftAway <= ftHome) {
+      ftAway = ftHome + 1;
+    }
+  }
+
+  // Find optimal (htHome, htAway) split within [0..ftHome] x [0..ftAway]
+  const minHtH = match.minute > 30 ? Math.min(ftHome, match.firstHalfHomeScore || 0) : Math.min(ftHome, match.firstHalfHomeScore || 0);
+  const minHtA = match.minute > 30 ? Math.min(ftAway, match.firstHalfAwayScore || 0) : Math.min(ftAway, match.firstHalfAwayScore || 0);
+  const maxHtH = match.minute > 30 ? minHtH : ftHome;
+  const maxHtA = match.minute > 30 ? minHtA : ftAway;
+
+  let bestHtH = Math.min(ftHome, Math.round(ftHome * 0.48));
+  let bestHtA = Math.min(ftAway, Math.round(ftAway * 0.48));
+  let bestScore = -1e9;
+  const targetHalfTotal = (ftHome + ftAway) * 0.48;
+
+  for (let h = minHtH; h <= maxHtH; h += 1) {
+    for (let a = minHtA; a <= maxHtA; a += 1) {
+      const htTot = h + a;
+      const shH = ftHome - h;
+      const shA = ftAway - a;
+      const shTot = shH + shA;
+      let score = -Math.abs(htTot - targetHalfTotal) * 0.5;
+
+      if (rule.firstHalf === 'Home & O10') score += h > a && htTot > 10 ? 100 : -100;
+      if (rule.firstHalf === 'X & O10') score += h === a && htTot > 10 ? 100 : -100;
+      if (rule.firstHalf === 'Away & O10') score += a > h && htTot > 10 ? 100 : -100;
+
+      if (rule.firstHalfOU15 === 'Over 15') score += htTot > 15 ? 100 : -100;
+      if (rule.firstHalfOU15 === 'Under 15') score += htTot < 15 ? 100 : -100;
+
+      if (rule.secondHalf === 'Home & O15') score += shH > shA && shTot > 15 ? 100 : -100;
+      if (rule.secondHalf === 'X & O15') score += shH === shA && shTot > 15 ? 100 : -100;
+      if (rule.secondHalf === 'Away & O15') score += shA > shH && shTot > 15 ? 100 : -100;
+
+      if (rule.firstGoal === 'Home' && h > 0) score += 8;
+      if (rule.firstGoal === 'Away' && a > 0) score += 8;
+      if (rule.fiveMinGoal === 'Yes' && htTot > 0) score += 8;
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestHtH = h;
+        bestHtA = a;
+      }
+    }
+  }
+
+  let firstGoalTeam: 'home' | 'away' = 'home';
+  if (rule.firstGoal === 'Home') firstGoalTeam = 'home';
+  else if (rule.firstGoal === 'Away') firstGoalTeam = 'away';
+  else if (bestHtH === 0 && bestHtA > 0) firstGoalTeam = 'away';
+  else if (bestHtA === 0 && bestHtH > 0) firstGoalTeam = 'home';
+  else if (ftAway > ftHome) firstGoalTeam = 'away';
+
+  return {
+    cacheKey,
+    htHome: bestHtH,
+    htAway: bestHtA,
+    ftHome,
+    ftAway,
+    firstGoalTeam,
+    fiveMinGoal: rule.fiveMinGoal,
+  };
+}
+
+function getOrBuildDtmPlan(match: VirtualMatch, rule: DtmMatchRule): DtmTargetPlan {
+  const round = match.roundNumber || 1;
+  const hNorm = match.homeTeam.trim().toLowerCase();
+  const aNorm = match.awayTeam.trim().toLowerCase();
+  const cacheKey = `${match.id}:r${round}:${hNorm}:${aNorm}:${rule.updatedAtMs}`;
+  const existing = dtmPlanCache.get(cacheKey);
+  if (existing) return existing;
+  const built = buildDtmTargetPlan(match, rule, cacheKey);
+  dtmPlanCache.set(cacheKey, built);
+  return built;
+}
+
+function applyDtmLiveStep(
+  updated: VirtualMatch,
+  plan: DtmTargetPlan,
+  isZoomMatch: boolean,
+  timeDisplay: number
+): boolean {
+  let scored = false;
+  const minute = updated.minute;
+  const totalPlanGoals = plan.ftHome + plan.ftAway;
+  if (totalPlanGoals === 0) {
+    return false;
+  }
+
+  // Respect 5-minute market gate
+  if (minute <= 5 && plan.fiveMinGoal === 'No') {
+    return false;
+  }
+
+  let desiredHome = updated.homeScore;
+  let desiredAway = updated.awayScore;
+
+  if (minute <= 30) {
+    const frac = Math.min(1, minute / 29);
+    desiredHome = Math.min(plan.htHome, Math.round(plan.htHome * frac));
+    desiredAway = Math.min(plan.htAway, Math.round(plan.htAway * frac));
+
+    if (minute >= 28) {
+      desiredHome = plan.htHome;
+      desiredAway = plan.htAway;
+    }
+
+    if (plan.fiveMinGoal === 'Yes' && minute >= 3 && updated.homeScore + updated.awayScore === 0) {
+      if (plan.firstGoalTeam === 'home' && plan.htHome > 0) desiredHome = Math.max(desiredHome, 1);
+      else if (plan.firstGoalTeam === 'away' && plan.htAway > 0) desiredAway = Math.max(desiredAway, 1);
+      else if (plan.htHome > 0) desiredHome = Math.max(desiredHome, 1);
+      else if (plan.htAway > 0) desiredAway = Math.max(desiredAway, 1);
+    }
+  } else {
+    const shFrac = Math.min(1, (minute - 30) / 29);
+    const shHomeTarget = Math.max(0, plan.ftHome - plan.htHome);
+    const shAwayTarget = Math.max(0, plan.ftAway - plan.htAway);
+    desiredHome = Math.min(plan.ftHome, plan.htHome + Math.round(shHomeTarget * shFrac));
+    desiredAway = Math.min(plan.ftAway, plan.htAway + Math.round(shAwayTarget * shFrac));
+
+    if (minute >= 58) {
+      desiredHome = plan.ftHome;
+      desiredAway = plan.ftAway;
+    }
+  }
+
+  const maxPerTick = minute >= 58 ? 3 : 1;
+  let homeToAdd = Math.max(0, Math.min(maxPerTick, desiredHome - updated.homeScore));
+  let awayToAdd = Math.max(0, Math.min(maxPerTick, desiredAway - updated.awayScore));
+
+  // Ensure firstGoalTeam scores first when total goals so far == 0
+  if (updated.homeScore === 0 && updated.awayScore === 0 && homeToAdd > 0 && awayToAdd > 0) {
+    if (plan.firstGoalTeam === 'home') {
+      awayToAdd = 0;
+    } else {
+      homeToAdd = 0;
+    }
+  }
+
+  while (homeToAdd > 0 || awayToAdd > 0) {
+    const scoreHomeFirst =
+      updated.homeScore === 0 && updated.awayScore === 0
+        ? plan.firstGoalTeam === 'home'
+          ? homeToAdd > 0
+          : awayToAdd === 0
+        : homeToAdd >= awayToAdd;
+
+    if (scoreHomeFirst && homeToAdd > 0) {
+      homeToAdd -= 1;
+      updated.homeScore += 1;
+      if (minute <= 30) {
+        updated.firstHalfHomeScore = (updated.firstHalfHomeScore || 0) + 1;
+      }
+      if (!updated.firstGoalTeam) updated.firstGoalTeam = 'home';
+      if (minute <= 5 && plan.fiveMinGoal !== 'No') updated.hadFiveMinGoal = true;
+      updated.stats.shotsOnTargetHome += 1;
+      const evText = isZoomMatch
+        ? `GOAL (${timeDisplay}s)! ${updated.homeTeam} scores! (${updated.homeScore} - ${updated.awayScore})`
+        : `GOAL! ${updated.homeTeam} scores! (${updated.homeScore} - ${updated.awayScore})`;
+      updated.events = [
+        { minute: isZoomMatch ? timeDisplay : updated.minute, text: evText, type: 'goal', team: 'home' },
+        ...updated.events.slice(0, 10),
+      ];
+      scored = true;
+    } else if (awayToAdd > 0) {
+      awayToAdd -= 1;
+      updated.awayScore += 1;
+      if (minute <= 30) {
+        updated.firstHalfAwayScore = (updated.firstHalfAwayScore || 0) + 1;
+      }
+      if (!updated.firstGoalTeam) updated.firstGoalTeam = 'away';
+      if (minute <= 5 && plan.fiveMinGoal !== 'No') updated.hadFiveMinGoal = true;
+      updated.stats.shotsOnTargetAway += 1;
+      const evText = isZoomMatch
+        ? `GOAL (${timeDisplay}s)! ${updated.awayTeam} scores! (${updated.homeScore} - ${updated.awayScore})`
+        : `GOAL! ${updated.awayTeam} finishes clinically! (${updated.homeScore} - ${updated.awayScore})`;
+      updated.events = [
+        { minute: isZoomMatch ? timeDisplay : updated.minute, text: evText, type: 'goal', team: 'away' },
+        ...updated.events.slice(0, 10),
+      ];
+      scored = true;
+    }
+  }
+
+  if (scored) {
+    recalculateOddsOnGoal(updated);
+  }
+  return scored;
+}
+
+function finalizeDtmMatchAtFullTime(updated: VirtualMatch, plan: DtmTargetPlan) {
+  updated.firstHalfHomeScore = plan.htHome;
+  updated.firstHalfAwayScore = plan.htAway;
+  updated.homeScore = plan.ftHome;
+  updated.awayScore = plan.ftAway;
+  if (plan.ftHome + plan.ftAway > 0) {
+    updated.firstGoalTeam = updated.firstGoalTeam || plan.firstGoalTeam;
+  } else {
+    updated.firstGoalTeam = undefined;
+  }
+  if (plan.fiveMinGoal === 'Yes') {
+    updated.hadFiveMinGoal = true;
+  } else if (plan.fiveMinGoal === 'No') {
+    updated.hadFiveMinGoal = false;
+  }
 }
 
 function recordMatchResultToH2HAndReset(match: VirtualMatch, now: number): { resetMatch: VirtualMatch; record: H2HRecord } {
@@ -2468,6 +2905,9 @@ async function startServer() {
       }
 
       if (updated.status === 'LIVE') {
+        const activeDtmRule = findActiveDtmRuleForMatch(updated);
+        const dtmPlan = activeDtmRule ? getOrBuildDtmPlan(updated, activeDtmRule) : null;
+
         if (isZoomMatch) {
           const zoomDuration = updated.durationSeconds || ZOOM_DURATION_SECONDS;
           const kickoffMs = updated.kickoffAt || now - Math.max(0, (updated.elapsedSeconds || 1) - 1) * 1000;
@@ -2491,7 +2931,14 @@ async function startServer() {
             }
           }
 
-          if (Math.random() < 0.24) {
+          if (dtmPlan) {
+            if (applyDtmLiveStep(updated, dtmPlan, true, elapsedSec)) {
+              matchesChanged = true;
+            } else if (Math.random() < 0.22) {
+              matchesChanged = true;
+              microFluctuateOdds(updated);
+            }
+          } else if (Math.random() < 0.24) {
             matchesChanged = true;
             const homeAdvantage = updated.stats.possessionHome / 100;
             const isHomeGoal = Math.random() < homeAdvantage;
@@ -2540,6 +2987,9 @@ async function startServer() {
           }
 
           if (now - kickoffMs >= zoomDuration * 1000) {
+            if (dtmPlan) {
+              finalizeDtmMatchAtFullTime(updated, dtmPlan);
+            }
             const { resetMatch, record } = recordMatchResultToH2HAndReset(updated, now);
             newlyRecordedH2H.push(record);
             matchesChanged = true;
@@ -2566,55 +3016,72 @@ async function startServer() {
             }
           }
 
-          // High-scoring virtual cadence (~0.34 goals/min across 60 normal minutes => ~20 goals total)
-          const goalRand = Math.random();
-          if (goalRand < 0.0088) {
-            matchesChanged = true;
-            const homeAdvantage = updated.stats.possessionHome / 100;
-            const isHomeGoal = Math.random() < homeAdvantage;
-            if (!updated.firstGoalTeam) {
-              updated.firstGoalTeam = isHomeGoal ? 'home' : 'away';
+          if (dtmPlan) {
+            const latestBefore = updated.events.length;
+            if (applyDtmLiveStep(updated, dtmPlan, false, updated.minute)) {
+              matchesChanged = true;
+              if (updated.events.length > latestBefore && updated.events[0]?.type === 'goal') {
+                const scorerName = updated.events[0].team === 'home' ? updated.homeTeam : updated.awayTeam;
+                broadcast('event:goal', { match: updated, text: `${scorerName} ⚽ GOAL!` });
+              }
+            } else if (Math.random() < 0.18) {
+              matchesChanged = true;
+              microFluctuateOdds(updated);
             }
-            if (updated.minute <= 5) {
-              updated.hadFiveMinGoal = true;
-            }
+          } else {
+            // High-scoring virtual cadence (~0.34 goals/min across 60 normal minutes => ~20 goals total)
+            const goalRand = Math.random();
+            if (goalRand < 0.0088) {
+              matchesChanged = true;
+              const homeAdvantage = updated.stats.possessionHome / 100;
+              const isHomeGoal = Math.random() < homeAdvantage;
+              if (!updated.firstGoalTeam) {
+                updated.firstGoalTeam = isHomeGoal ? 'home' : 'away';
+              }
+              if (updated.minute <= 5) {
+                updated.hadFiveMinGoal = true;
+              }
 
-            if (isHomeGoal) {
-              updated.homeScore += 1;
-              if (updated.minute <= 30) {
-                updated.firstHalfHomeScore = (updated.firstHalfHomeScore || 0) + 1;
+              if (isHomeGoal) {
+                updated.homeScore += 1;
+                if (updated.minute <= 30) {
+                  updated.firstHalfHomeScore = (updated.firstHalfHomeScore || 0) + 1;
+                }
+                updated.stats.shotsOnTargetHome += 1;
+                const event: MatchEvent = {
+                  minute: updated.minute,
+                  text: `GOAL! ${updated.homeTeam} scores! (${updated.homeScore} - ${updated.awayScore})`,
+                  type: 'goal',
+                  team: 'home'
+                };
+                updated.events = [event, ...updated.events.slice(0, 10)];
+                broadcast('event:goal', { match: updated, text: `${updated.homeTeam} ⚽ GOAL!` });
+              } else {
+                updated.awayScore += 1;
+                if (updated.minute <= 30) {
+                  updated.firstHalfAwayScore = (updated.firstHalfAwayScore || 0) + 1;
+                }
+                updated.stats.shotsOnTargetAway += 1;
+                const event: MatchEvent = {
+                  minute: updated.minute,
+                  text: `GOAL! ${updated.awayTeam} finishes clinically! (${updated.homeScore} - ${updated.awayScore})`,
+                  type: 'goal',
+                  team: 'away'
+                };
+                updated.events = [event, ...updated.events.slice(0, 10)];
+                broadcast('event:goal', { match: updated, text: `${updated.awayTeam} ⚽ GOAL!` });
               }
-              updated.stats.shotsOnTargetHome += 1;
-              const event: MatchEvent = {
-                minute: updated.minute,
-                text: `GOAL! ${updated.homeTeam} scores! (${updated.homeScore} - ${updated.awayScore})`,
-                type: 'goal',
-                team: 'home'
-              };
-              updated.events = [event, ...updated.events.slice(0, 10)];
-              broadcast('event:goal', { match: updated, text: `${updated.homeTeam} ⚽ GOAL!` });
-            } else {
-              updated.awayScore += 1;
-              if (updated.minute <= 30) {
-                updated.firstHalfAwayScore = (updated.firstHalfAwayScore || 0) + 1;
-              }
-              updated.stats.shotsOnTargetAway += 1;
-              const event: MatchEvent = {
-                minute: updated.minute,
-                text: `GOAL! ${updated.awayTeam} finishes clinically! (${updated.homeScore} - ${updated.awayScore})`,
-                type: 'goal',
-                team: 'away'
-              };
-              updated.events = [event, ...updated.events.slice(0, 10)];
-              broadcast('event:goal', { match: updated, text: `${updated.awayTeam} ⚽ GOAL!` });
+              recalculateOddsOnGoal(updated);
+            } else if (Math.random() < 0.18) {
+              matchesChanged = true;
+              microFluctuateOdds(updated);
             }
-            recalculateOddsOnGoal(updated);
-          } else if (Math.random() < 0.18) {
-            matchesChanged = true;
-            microFluctuateOdds(updated);
           }
 
           if (now - kickoffMs >= duration * 60000) {
+            if (dtmPlan) {
+              finalizeDtmMatchAtFullTime(updated, dtmPlan);
+            }
             const { resetMatch, record } = recordMatchResultToH2HAndReset(updated, now);
             newlyRecordedH2H.push(record);
             matchesChanged = true;
@@ -3507,7 +3974,28 @@ async function startServer() {
       }
     }
 
-    if (usersChanged || clubsChanged || leaguesChanged || matchesChanged) {
+    const cloudDtmRules = Array.isArray(req.body?.dtmRules) ? (req.body.dtmRules as Partial<DtmMatchRule>[]) : [];
+    let dtmChanged = false;
+    if (!Array.isArray(store.dtmRules)) {
+      store.dtmRules = [];
+    }
+
+    for (const rawRule of cloudDtmRules) {
+      const normalized = normalizeDtmRule(rawRule);
+      if (!normalized) continue;
+      const existingIdx = store.dtmRules.findIndex(r => r.id === normalized.id);
+      if (existingIdx === -1) {
+        store.dtmRules = [normalized, ...store.dtmRules];
+        clearDtmPlanCacheForRule(normalized);
+        dtmChanged = true;
+      } else if (normalized.updatedAtMs > store.dtmRules[existingIdx].updatedAtMs) {
+        store.dtmRules[existingIdx] = normalized;
+        clearDtmPlanCacheForRule(normalized);
+        dtmChanged = true;
+      }
+    }
+
+    if (usersChanged || clubsChanged || leaguesChanged || matchesChanged || dtmChanged) {
       saveStore(store);
     }
 
@@ -3535,8 +4023,134 @@ async function startServer() {
       clubs: store.clubs,
       leagues: store.leagues,
       matches: store.matches,
+      dtmRules: store.dtmRules,
       versions: sliceVersions,
     });
+  });
+
+  // Admin: Search & Verify Soccer Match
+  app.get('/api/admin/matches/search', (req, res) => {
+    if (!isValidAdminRequest(req)) {
+      return res.status(403).json({ ok: false, error: 'Admin authorization required.' });
+    }
+    const rawQuery = String(req.query?.q || '').trim().toLowerCase();
+    const sortedMatches = [...store.matches].sort((a, b) => {
+      if (a.status === 'LIVE' && b.status !== 'LIVE') return -1;
+      if (b.status === 'LIVE' && a.status !== 'LIVE') return 1;
+      if (a.isFeatured && !b.isFeatured) return -1;
+      if (b.isFeatured && !a.isFeatured) return 1;
+      return (a.startsInSeconds || 0) - (b.startsInSeconds || 0);
+    });
+
+    if (!rawQuery) {
+      return res.json({ ok: true, verified: true, matches: sortedMatches.slice(0, 60) });
+    }
+
+    const matched = sortedMatches.filter(m => {
+      const matchup = `${m.homeTeam} vs ${m.awayTeam}`.toLowerCase();
+      return (
+        m.id.toLowerCase().includes(rawQuery) ||
+        m.homeTeam.toLowerCase().includes(rawQuery) ||
+        m.awayTeam.toLowerCase().includes(rawQuery) ||
+        m.league.toLowerCase().includes(rawQuery) ||
+        m.country.toLowerCase().includes(rawQuery) ||
+        matchup.includes(rawQuery)
+      );
+    });
+
+    if (matched.length === 0) {
+      return res.json({
+        ok: true,
+        verified: false,
+        matches: [],
+        error: `No active or scheduled soccer match found for "${String(req.query?.q || '').trim()}".`,
+      });
+    }
+
+    return res.json({ ok: true, verified: true, matches: matched.slice(0, 60) });
+  });
+
+  // Admin: DTM Rules Management (Private — never exposed on /api/state or WS)
+  app.get('/api/admin/dtm', (req, res) => {
+    if (!isValidAdminRequest(req)) {
+      return res.status(403).json({ ok: false, error: 'Admin authorization required.' });
+    }
+    const rules = Array.isArray(store.dtmRules) ? store.dtmRules : [];
+    return res.json({ ok: true, dtmRules: rules });
+  });
+
+  app.put('/api/admin/dtm/:ruleId', (req, res) => {
+    if (!isValidAdminRequest(req)) {
+      return res.status(403).json({ ok: false, error: 'Admin authorization required.' });
+    }
+    if (!Array.isArray(store.dtmRules)) {
+      store.dtmRules = [];
+    }
+    const cleanId = sanitizeDtmRuleId(req.params.ruleId);
+    const existingIdx = store.dtmRules.findIndex(r => r.id === cleanId);
+    const existing = existingIdx !== -1 ? store.dtmRules[existingIdx] : undefined;
+    const normalized = normalizeDtmRule(
+      { ...(req.body || {}), id: cleanId, updatedAtMs: Date.now() },
+      existing
+    );
+    if (!normalized) {
+      return res.status(400).json({ ok: false, error: 'Invalid match target payload.' });
+    }
+
+    if (existingIdx !== -1) {
+      store.dtmRules[existingIdx] = normalized;
+    } else {
+      store.dtmRules = [normalized, ...store.dtmRules];
+    }
+    clearDtmPlanCacheForRule(normalized);
+    sliceVersions.dtm += 1;
+    saveStore(store);
+
+    return res.json({ ok: true, rule: normalized, dtmRules: store.dtmRules });
+  });
+
+  app.post('/api/admin/dtm/:ruleId/toggle', (req, res) => {
+    if (!isValidAdminRequest(req)) {
+      return res.status(403).json({ ok: false, error: 'Admin authorization required.' });
+    }
+    if (!Array.isArray(store.dtmRules)) {
+      store.dtmRules = [];
+    }
+    const cleanId = sanitizeDtmRuleId(req.params.ruleId);
+    const idx = store.dtmRules.findIndex(r => r.id === cleanId);
+    if (idx === -1) {
+      return res.status(404).json({ ok: false, error: 'Rule not found.' });
+    }
+    const nextEnabled =
+      typeof req.body?.enabled === 'boolean' ? req.body.enabled : !store.dtmRules[idx].enabled;
+    const updated: DtmMatchRule = {
+      ...store.dtmRules[idx],
+      enabled: nextEnabled,
+      updatedAtMs: Date.now(),
+    };
+    store.dtmRules[idx] = updated;
+    clearDtmPlanCacheForRule(updated);
+    sliceVersions.dtm += 1;
+    saveStore(store);
+
+    return res.json({ ok: true, rule: updated, dtmRules: store.dtmRules });
+  });
+
+  app.delete('/api/admin/dtm/:ruleId', (req, res) => {
+    if (!isValidAdminRequest(req)) {
+      return res.status(403).json({ ok: false, error: 'Admin authorization required.' });
+    }
+    if (!Array.isArray(store.dtmRules)) {
+      store.dtmRules = [];
+    }
+    const cleanId = sanitizeDtmRuleId(req.params.ruleId);
+    const existing = store.dtmRules.find(r => r.id === cleanId);
+    store.dtmRules = store.dtmRules.filter(r => r.id !== cleanId);
+    clearDtmPlanCacheForRule(existing);
+    sliceVersions.dtm += 1;
+    saveStore(store);
+
+    return res.json({ ok: true, dtmRules: store.dtmRules });
   });
 
   // Admin: Create Permanent Club

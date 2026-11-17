@@ -360,6 +360,94 @@
         }
       },
       "required": ["id", "league", "country", "homeTeam", "awayTeam", "homeScore", "awayScore", "minute", "status", "startsInSeconds", "homeOdds", "drawOdds", "awayOdds", "updatedAt"]
+    },
+    "DtmRuleEntity": {
+      "title": "DtmRuleEntity",
+      "description": "Admin-only persistent soccer match enforcement configuration.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "matchId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "homeTeam": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "awayTeam": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "league": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "winner1X2": {
+          "type": "string",
+          "enum": ["Home & O15", "Draw", "Away & O15"]
+        },
+        "firstGoal": {
+          "type": "string",
+          "enum": ["Home", "Away"]
+        },
+        "fiveMinGoal": {
+          "type": "string",
+          "enum": ["Yes", "No", "Over 5 Goals"]
+        },
+        "oddEven": {
+          "type": "string",
+          "enum": ["Odd", "Even"]
+        },
+        "firstHalf": {
+          "type": "string",
+          "enum": ["Home & O10", "X & O10", "Away & O10"]
+        },
+        "firstHalfOU15": {
+          "type": "string",
+          "enum": ["Over 15", "Under 15"]
+        },
+        "secondHalf": {
+          "type": "string",
+          "enum": ["Home & O15", "X & O15", "Away & O15"]
+        },
+        "overUnderLine": {
+          "type": "number"
+        },
+        "overUnderPick": {
+          "type": "string",
+          "enum": ["Over", "Under"]
+        },
+        "overUnderTargetGoals": {
+          "type": "number"
+        },
+        "correctScoreHome": {
+          "type": "number"
+        },
+        "correctScoreAway": {
+          "type": "number"
+        },
+        "updatedAtMs": {
+          "type": "number"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "matchId", "homeTeam", "awayTeam", "league", "enabled", "updatedAtMs", "updatedAt"]
     }
   },
   "firestore": {
@@ -394,6 +482,10 @@
     "/matches/{matchId}": {
       "schema": { "$ref": "#/entities/MatchEntity" },
       "description": "Admin-fixed matches synced across devices."
+    },
+    "/dtmRules/{ruleId}": {
+      "schema": { "$ref": "#/entities/DtmRuleEntity" },
+      "description": "Admin-only persistent match rules synced across Web and Mobile Admin dashboards."
     }
   }
 }

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Club, League, VirtualMatch, RegisteredUser } from '../types';
+import { Club, League, VirtualMatch, RegisteredUser, DtmMatchRule, MarketType } from '../types';
 import { virtualEngine, PRESET_FIXTURES_INFO } from '../services/virtualEngine';
 import { soundManager } from '../services/soundEffects';
 import {
@@ -25,10 +25,10 @@ import {
   Edit3,
   Clock,
   Save,
-  User,
-  LogOut,
   Cloud,
-  RefreshCw
+  RefreshCw,
+  SlidersHorizontal,
+  Power
 } from 'lucide-react';
 import {
   subscribeFirebaseAuth,
@@ -45,6 +45,8 @@ import {
   upsertCloudLeague,
   upsertCloudMatch,
   deleteCloudMatch,
+  upsertCloudDtmRule,
+  deleteCloudDtmRule,
   type AdminCloudSnapshotState,
 } from '../services/firebaseSync';
 
@@ -59,7 +61,8 @@ interface AdminDashboardProps {
 
 type AdminPage =
   | 'hub'
-  | 'profile'
+  | 'dtm_search'
+  | 'dtm_bookmaker'
   | 'fix_match'
   | 'create_club'
   | 'club_directory'
@@ -76,7 +79,8 @@ const AVATAR_OPTIONS = ['🦁', '👑', '⚡', '💎', '⚽', '🎯', '🚀', '�
 
 const VALID_ADMIN_PAGES: AdminPage[] = [
   'hub',
-  'profile',
+  'dtm_search',
+  'dtm_bookmaker',
   'fix_match',
   'create_club',
   'club_directory',
@@ -92,16 +96,33 @@ function loadSavedAdminPage(): AdminPage {
   if (typeof window === 'undefined') return 'hub';
   const saved = window.localStorage.getItem('cas9i_admin_page') as AdminPage | null;
   if (saved === 'edit_user') return 'users';
+  if (saved === 'dtm_bookmaker') return 'dtm_search';
   return saved && VALID_ADMIN_PAGES.includes(saved) ? saved : 'hub';
+}
+
+interface DtmEditorModalState {
+  marketType: MarketType;
+  marketName: string;
+  optionLabel: string;
+  winner1X2: 'Home & O15' | 'Draw' | 'Away & O15';
+  firstGoal: 'Home' | 'Away';
+  fiveMinGoal: 'Yes' | 'No' | 'Over 5 Goals';
+  oddEven: 'Odd' | 'Even';
+  firstHalf: 'Home & O10' | 'X & O10' | 'Away & O10';
+  firstHalfOU15: 'Over 15' | 'Under 15';
+  secondHalf: 'Home & O15' | 'X & O15' | 'Away & O15';
+  overUnderLine: number;
+  overUnderPick: 'Over' | 'Under';
+  overUnderTargetGoals: string;
+  csHome: string;
+  csAway: string;
+  applyOptionalScore: boolean;
 }
 
 export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   matches,
   clubs,
   leagues,
-  adminBalance,
-  adminEmail,
-  onLogout
 }) => {
   const [activePage, setActivePage] = useState<AdminPage>(() => loadSavedAdminPage());
   const [toastMsg, setToastMsg] = useState<string | null>(null);
@@ -166,6 +187,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     accountTier: 'Standard',
     notes: ''
   });
+
+  // DTM Search & Bookmaker State
+  const [dtmRules, setDtmRules] = useState<DtmMatchRule[]>([]);
+  const [dtmSearchQuery, setDtmSearchQuery] = useState('');
+  const [dtmVerifiedMatches, setDtmVerifiedMatches] = useState<VirtualMatch[]>([]);
+  const [dtmSearchError, setDtmSearchError] = useState<string | null>(null);
+  const [dtmIsVerifying, setDtmIsVerifying] = useState(false);
+  const [dtmHasSearched, setDtmHasSearched] = useState(false);
+  const [selectedDtmMatch, setSelectedDtmMatch] = useState<VirtualMatch | null>(null);
+  const [dtmMarketTab, setDtmMarketTab] = useState<'ALL' | '1X2' | 'HALVES' | 'OU' | 'SCORE'>('ALL');
+  const [dtmModal, setDtmModal] = useState<DtmEditorModalState | null>(null);
+  const [dtmModalError, setDtmModalError] = useState<string | null>(null);
 
   // Create Club State
   const [clubCreateMode, setClubCreateMode] = useState<'single' | 'bulk'>('single');
@@ -237,7 +270,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [homeClubId, awayClubId]);
 
-  // Fetch registered & verified users on mount and live updates
+  // Fetch registered & verified users and DTM rules on mount and live updates
   const loadUsersList = async (): Promise<RegisteredUser[]> => {
     try {
       const list = await virtualEngine.fetchAdminUsers();
@@ -249,8 +282,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   };
 
+  const loadDtmRulesList = async (): Promise<DtmMatchRule[]> => {
+    try {
+      const rules = await virtualEngine.fetchAdminDtmRules();
+      setDtmRules(rules);
+      return rules;
+    } catch {
+      return [];
+    }
+  };
+
   useEffect(() => {
     void loadUsersList();
+    void loadDtmRulesList();
     const unsub = virtualEngine.onUsersChanged(() => {
       void loadUsersList().then(list => {
         if (!isCloudConnected || !cloudSyncRef.current) return;
@@ -292,7 +336,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           const cloudUserIds = new Set(cloudState.users.map(cu => cu.user.id));
 
           void (async () => {
-            const localBefore = await loadUsersList();
+            const [localBefore, localRulesBefore] = await Promise.all([
+              loadUsersList(),
+              loadDtmRulesList(),
+            ]);
             const syncedUsers = await virtualEngine.pushCloudSyncToServer({
               users: cloudState.users.map(cu => cu.user),
               deletedUserIds: cloudState.deletedUserIds,
@@ -300,10 +347,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               deletedClubIds: cloudState.deletedClubIds,
               leagues: cloudState.leagues,
               matches: cloudState.matches,
+              dtmRules: cloudState.dtmRules,
             });
             if (syncedUsers) {
               latestUsersRef.current = syncedUsers;
               setUsers(syncedUsers);
+            }
+            const refreshedRules = await loadDtmRulesList();
+
+            // Push any local DTM rules newer than Firestore up to cloud
+            const cloudRuleMap = new Map(cloudState.dtmRules.map(r => [r.id, r]));
+            for (const lr of refreshedRules.length > 0 ? refreshedRules : localRulesBefore) {
+              const cr = cloudRuleMap.get(lr.id);
+              if (!cr || lr.updatedAtMs > cr.updatedAtMs) {
+                void upsertCloudDtmRule(lr);
+              }
             }
 
             // Push any locally-registered un-tombstoned users up to Firestore permanently
@@ -529,12 +587,384 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setDepositSuccessMsg(null);
     setPendingDeleteClubId(null);
     setPendingDeleteUserId(null);
+    setDtmSearchError(null);
+    setDtmModal(null);
     setActivePage(page);
-    if (page === 'users' || page === 'deposit' || page === 'profile') {
+    if (page === 'users' || page === 'deposit') {
       void loadUsersList();
     }
-    if (typeof window !== 'undefined' && page !== 'edit_user') {
+    if (page === 'dtm_search' || page === 'dtm_bookmaker') {
+      void loadDtmRulesList();
+    }
+    if (typeof window !== 'undefined' && page !== 'edit_user' && page !== 'dtm_bookmaker') {
       window.localStorage.setItem('cas9i_admin_page', page);
+    }
+  };
+
+  const getDtmRuleForMatch = (match: VirtualMatch | null): DtmMatchRule | undefined => {
+    if (!match) return undefined;
+    const byId = dtmRules.find(r => r.matchId === match.id);
+    if (byId) return byId;
+    const hNorm = match.homeTeam.trim().toLowerCase();
+    const aNorm = match.awayTeam.trim().toLowerCase();
+    return dtmRules.find(
+      r => r.homeTeam.trim().toLowerCase() === hNorm && r.awayTeam.trim().toLowerCase() === aNorm
+    );
+  };
+
+  const openDtmBookmaker = (match: VirtualMatch) => {
+    soundManager.playClick();
+    setSelectedDtmMatch(match);
+    setDtmMarketTab('ALL');
+    setDtmModal(null);
+    setDtmModalError(null);
+    setActivePage('dtm_bookmaker');
+  };
+
+  const handleDtmSearchSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const q = dtmSearchQuery.trim();
+    if (!q) {
+      setDtmSearchError('Enter a club name, league, or match ID to verify.');
+      return;
+    }
+    soundManager.playClick();
+    setDtmSearchError(null);
+    setDtmIsVerifying(true);
+    setDtmHasSearched(true);
+    try {
+      const res = await virtualEngine.searchAdminSoccerMatches(q);
+      setDtmVerifiedMatches(res.matches);
+      if (!res.verified || res.matches.length === 0) {
+        setDtmSearchError(res.error || `No soccer match found for "${q}".`);
+        return;
+      }
+      if (res.matches.length === 1) {
+        openDtmBookmaker(res.matches[0]);
+      }
+    } catch (err) {
+      setDtmVerifiedMatches([]);
+      setDtmSearchError(err instanceof Error ? err.message : 'Unable to verify match.');
+    } finally {
+      setDtmIsVerifying(false);
+    }
+  };
+
+  const openDtmOptionModal = (
+    match: VirtualMatch,
+    marketType: MarketType,
+    marketName: string,
+    optionLabel: string
+  ) => {
+    soundManager.playClick();
+    const existingRule = getDtmRuleForMatch(match);
+    let csH = typeof existingRule?.correctScoreHome === 'number' ? String(existingRule.correctScoreHome) : '10';
+    let csA = typeof existingRule?.correctScoreAway === 'number' ? String(existingRule.correctScoreAway) : '8';
+    let applyOptionalScore = false;
+
+    if (marketType === 'Correct Score' && optionLabel.includes(':')) {
+      const [hPart, aPart] = optionLabel.split(':');
+      csH = String(Math.max(0, Math.floor(Number(hPart) || 0)));
+      csA = String(Math.max(0, Math.floor(Number(aPart) || 0)));
+      applyOptionalScore = true;
+    } else if (marketType === '1X2') {
+      if (optionLabel === 'Draw') {
+        csH = '9';
+        csA = '9';
+      } else if (optionLabel === 'Home & O15') {
+        csH = '11';
+        csA = '8';
+      } else {
+        csH = '8';
+        csA = '11';
+      }
+    }
+
+    let ouLine = existingRule?.overUnderLine ?? 20;
+    let ouPick: 'Over' | 'Under' = existingRule?.overUnderPick ?? 'Over';
+    let ouGoals =
+      typeof existingRule?.overUnderTargetGoals === 'number' ? String(existingRule.overUnderTargetGoals) : '21';
+    if (marketType === 'Over/Under') {
+      const parts = optionLabel.split(' ');
+      const side = parts[0] === 'Under' ? 'Under' : 'Over';
+      const parsedLine = Math.max(15, Math.min(30, Math.floor(Number(parts[1]) || 20)));
+      ouPick = side;
+      ouLine = parsedLine;
+      ouGoals = String(side === 'Over' ? parsedLine + 1 : Math.max(0, parsedLine - 1));
+    }
+
+    setDtmModalError(null);
+    setDtmModal({
+      marketType,
+      marketName,
+      optionLabel,
+      winner1X2:
+        marketType === '1X2' && (optionLabel === 'Home & O15' || optionLabel === 'Draw' || optionLabel === 'Away & O15')
+          ? optionLabel
+          : existingRule?.winner1X2 || 'Home & O15',
+      firstGoal:
+        marketType === '1st Goal' && (optionLabel === 'Home' || optionLabel === 'Away')
+          ? optionLabel
+          : existingRule?.firstGoal || 'Home',
+      fiveMinGoal:
+        marketType === '5 Min Goal' &&
+        (optionLabel === 'Yes' || optionLabel === 'No' || optionLabel === 'Over 5 Goals')
+          ? optionLabel
+          : existingRule?.fiveMinGoal || 'Yes',
+      oddEven:
+        marketType === 'Odd/Even' && (optionLabel === 'Odd' || optionLabel === 'Even')
+          ? optionLabel
+          : existingRule?.oddEven || 'Odd',
+      firstHalf:
+        marketType === '1st Half' &&
+        marketName === '1st Half' &&
+        (optionLabel === 'Home & O10' || optionLabel === 'X & O10' || optionLabel === 'Away & O10')
+          ? optionLabel
+          : existingRule?.firstHalf || 'Home & O10',
+      firstHalfOU15:
+        marketName === '1st Half O/U 15' && (optionLabel === 'Over 15' || optionLabel === 'Under 15')
+          ? optionLabel
+          : existingRule?.firstHalfOU15 || 'Over 15',
+      secondHalf:
+        marketType === '2nd Half' &&
+        (optionLabel === 'Home & O15' || optionLabel === 'X & O15' || optionLabel === 'Away & O15')
+          ? optionLabel
+          : existingRule?.secondHalf || 'Home & O15',
+      overUnderLine: ouLine,
+      overUnderPick: ouPick,
+      overUnderTargetGoals: ouGoals,
+      csHome: csH,
+      csAway: csA,
+      applyOptionalScore,
+    });
+  };
+
+  const persistDtmRuleUpdate = async (nextRule: DtmMatchRule, toastText: string) => {
+    setIsSubmitting(true);
+    try {
+      const res = await virtualEngine.saveAdminDtmRule(nextRule);
+      setDtmRules(res.dtmRules);
+      if (isCloudConnected) {
+        void upsertCloudDtmRule(res.rule);
+      }
+      setDtmModal(null);
+      showToast(toastText);
+    } catch (err) {
+      setDtmModalError(err instanceof Error ? err.message : 'Unable to save result.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleSaveDtmModal = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedDtmMatch || !dtmModal || isSubmitting) return;
+    setDtmModalError(null);
+
+    const existing = getDtmRuleForMatch(selectedDtmMatch);
+    const ruleId = existing?.id || `dtm-${selectedDtmMatch.id.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+    const baseRule: DtmMatchRule = {
+      id: ruleId,
+      matchId: selectedDtmMatch.id,
+      homeTeam: selectedDtmMatch.homeTeam,
+      awayTeam: selectedDtmMatch.awayTeam,
+      league: selectedDtmMatch.league,
+      enabled: true,
+      winner1X2: existing?.winner1X2,
+      firstGoal: existing?.firstGoal,
+      fiveMinGoal: existing?.fiveMinGoal,
+      oddEven: existing?.oddEven,
+      firstHalf: existing?.firstHalf,
+      firstHalfOU15: existing?.firstHalfOU15,
+      secondHalf: existing?.secondHalf,
+      overUnderLine: existing?.overUnderLine,
+      overUnderPick: existing?.overUnderPick,
+      overUnderTargetGoals: existing?.overUnderTargetGoals,
+      correctScoreHome: existing?.correctScoreHome,
+      correctScoreAway: existing?.correctScoreAway,
+      updatedAtMs: Date.now(),
+    };
+
+    if (dtmModal.marketType === 'Correct Score') {
+      const h = Math.floor(Number(dtmModal.csHome));
+      const a = Math.floor(Number(dtmModal.csAway));
+      if (!Number.isFinite(h) || !Number.isFinite(a) || h < 0 || a < 0 || h > 99 || a > 99) {
+        setDtmModalError('Enter valid scores between 0 and 99.');
+        return;
+      }
+      baseRule.correctScoreHome = h;
+      baseRule.correctScoreAway = a;
+      const tot = h + a;
+      if (baseRule.winner1X2 === 'Draw' && h !== a) baseRule.winner1X2 = undefined;
+      if (baseRule.winner1X2 === 'Home & O15' && (h <= a || tot <= 15)) baseRule.winner1X2 = undefined;
+      if (baseRule.winner1X2 === 'Away & O15' && (a <= h || tot <= 15)) baseRule.winner1X2 = undefined;
+      if (baseRule.oddEven === 'Odd' && tot % 2 === 0) baseRule.oddEven = undefined;
+      if (baseRule.oddEven === 'Even' && tot % 2 !== 0) baseRule.oddEven = undefined;
+      await persistDtmRuleUpdate(baseRule, `Saved ${h}:${a} for ${selectedDtmMatch.homeTeam} vs ${selectedDtmMatch.awayTeam}`);
+      return;
+    }
+
+    if (dtmModal.marketType === '1X2') {
+      baseRule.winner1X2 = dtmModal.winner1X2;
+      if (dtmModal.applyOptionalScore) {
+        const h = Math.floor(Number(dtmModal.csHome));
+        const a = Math.floor(Number(dtmModal.csAway));
+        if (!Number.isFinite(h) || !Number.isFinite(a) || h < 0 || a < 0 || h > 99 || a > 99) {
+          setDtmModalError('Enter valid scores between 0 and 99.');
+          return;
+        }
+        if (dtmModal.winner1X2 === 'Draw' && h !== a) {
+          setDtmModalError('Draw requires equal Home and Away scores.');
+          return;
+        }
+        if (dtmModal.winner1X2 === 'Home & O15' && (h <= a || h + a <= 15)) {
+          setDtmModalError('Home & O15 requires Home > Away and total goals > 15.');
+          return;
+        }
+        if (dtmModal.winner1X2 === 'Away & O15' && (a <= h || h + a <= 15)) {
+          setDtmModalError('Away & O15 requires Away > Home and total goals > 15.');
+          return;
+        }
+        baseRule.correctScoreHome = h;
+        baseRule.correctScoreAway = a;
+      } else {
+        baseRule.correctScoreHome = undefined;
+        baseRule.correctScoreAway = undefined;
+      }
+      await persistDtmRuleUpdate(baseRule, `Saved 1X2 (${dtmModal.winner1X2})`);
+      return;
+    }
+
+    if (dtmModal.marketType === '1st Goal') {
+      baseRule.firstGoal = dtmModal.firstGoal;
+      await persistDtmRuleUpdate(baseRule, `Saved 1st Goal (${dtmModal.firstGoal})`);
+      return;
+    }
+
+    if (dtmModal.marketType === '5 Min Goal') {
+      baseRule.fiveMinGoal = dtmModal.fiveMinGoal;
+      await persistDtmRuleUpdate(baseRule, `Saved 5 Min Goal (${dtmModal.fiveMinGoal})`);
+      return;
+    }
+
+    if (dtmModal.marketType === 'Odd/Even') {
+      baseRule.oddEven = dtmModal.oddEven;
+      baseRule.correctScoreHome = undefined;
+      baseRule.correctScoreAway = undefined;
+      await persistDtmRuleUpdate(baseRule, `Saved Odd/Even (${dtmModal.oddEven})`);
+      return;
+    }
+
+    if (dtmModal.marketName === '1st Half O/U 15') {
+      baseRule.firstHalfOU15 = dtmModal.firstHalfOU15;
+      await persistDtmRuleUpdate(baseRule, `Saved 1st Half O/U 15 (${dtmModal.firstHalfOU15})`);
+      return;
+    }
+
+    if (dtmModal.marketType === '1st Half') {
+      baseRule.firstHalf = dtmModal.firstHalf;
+      await persistDtmRuleUpdate(baseRule, `Saved 1st Half (${dtmModal.firstHalf})`);
+      return;
+    }
+
+    if (dtmModal.marketType === '2nd Half') {
+      baseRule.secondHalf = dtmModal.secondHalf;
+      await persistDtmRuleUpdate(baseRule, `Saved 2nd Half (${dtmModal.secondHalf})`);
+      return;
+    }
+
+    if (dtmModal.marketType === 'Over/Under') {
+      const targetTot = Math.floor(Number(dtmModal.overUnderTargetGoals));
+      if (!Number.isFinite(targetTot) || targetTot < 0 || targetTot > 99) {
+        setDtmModalError('Enter a valid total goals count (0 - 99).');
+        return;
+      }
+      if (dtmModal.overUnderPick === 'Over' && targetTot <= dtmModal.overUnderLine) {
+        setDtmModalError(`Over ${dtmModal.overUnderLine} requires total goals greater than ${dtmModal.overUnderLine}.`);
+        return;
+      }
+      if (dtmModal.overUnderPick === 'Under' && targetTot >= dtmModal.overUnderLine) {
+        setDtmModalError(`Under ${dtmModal.overUnderLine} requires total goals less than ${dtmModal.overUnderLine}.`);
+        return;
+      }
+      baseRule.overUnderLine = dtmModal.overUnderLine;
+      baseRule.overUnderPick = dtmModal.overUnderPick;
+      baseRule.overUnderTargetGoals = targetTot;
+      baseRule.correctScoreHome = undefined;
+      baseRule.correctScoreAway = undefined;
+      await persistDtmRuleUpdate(
+        baseRule,
+        `Saved ${dtmModal.overUnderPick} ${dtmModal.overUnderLine} (${targetTot} goals)`
+      );
+    }
+  };
+
+  const handleClearDtmModalMarket = async () => {
+    if (!selectedDtmMatch || !dtmModal || isSubmitting) return;
+    const existing = getDtmRuleForMatch(selectedDtmMatch);
+    if (!existing) {
+      setDtmModal(null);
+      return;
+    }
+    const nextRule: DtmMatchRule = { ...existing, updatedAtMs: Date.now() };
+    if (dtmModal.marketType === 'Correct Score') {
+      nextRule.correctScoreHome = undefined;
+      nextRule.correctScoreAway = undefined;
+    } else if (dtmModal.marketType === '1X2') {
+      nextRule.winner1X2 = undefined;
+    } else if (dtmModal.marketType === '1st Goal') {
+      nextRule.firstGoal = undefined;
+    } else if (dtmModal.marketType === '5 Min Goal') {
+      nextRule.fiveMinGoal = undefined;
+    } else if (dtmModal.marketType === 'Odd/Even') {
+      nextRule.oddEven = undefined;
+    } else if (dtmModal.marketName === '1st Half O/U 15') {
+      nextRule.firstHalfOU15 = undefined;
+    } else if (dtmModal.marketType === '1st Half') {
+      nextRule.firstHalf = undefined;
+    } else if (dtmModal.marketType === '2nd Half') {
+      nextRule.secondHalf = undefined;
+    } else if (dtmModal.marketType === 'Over/Under') {
+      nextRule.overUnderLine = undefined;
+      nextRule.overUnderPick = undefined;
+      nextRule.overUnderTargetGoals = undefined;
+    }
+    await persistDtmRuleUpdate(nextRule, `Cleared ${dtmModal.marketName}`);
+  };
+
+  const handleToggleDtmRule = async (rule: DtmMatchRule) => {
+    if (isSubmitting) return;
+    soundManager.playClick();
+    setIsSubmitting(true);
+    try {
+      const res = await virtualEngine.toggleAdminDtmRule(rule.id, !rule.enabled);
+      setDtmRules(res.dtmRules);
+      if (isCloudConnected) {
+        void upsertCloudDtmRule(res.rule);
+      }
+      showToast(res.rule.enabled ? `Enabled ${rule.homeTeam} vs ${rule.awayTeam}` : `Disabled ${rule.homeTeam} vs ${rule.awayTeam}`);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Unable to update status.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleDeleteDtmRule = async (ruleId: string) => {
+    if (isSubmitting) return;
+    soundManager.playClick();
+    setIsSubmitting(true);
+    try {
+      const updated = await virtualEngine.deleteAdminDtmRule(ruleId);
+      setDtmRules(updated);
+      if (isCloudConnected) {
+        void deleteCloudDtmRule(ruleId);
+      }
+      showToast('Removed match target.');
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Unable to remove.');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -778,7 +1208,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   const pageTitleMap: Record<AdminPage, string> = {
     hub: 'Admin Dashboard',
-    profile: 'Profile',
+    dtm_search: 'DTM',
+    dtm_bookmaker: selectedDtmMatch ? `${selectedDtmMatch.homeTeam} vs ${selectedDtmMatch.awayTeam}` : 'DTM Bookmaker',
     fix_match: 'Fix Match',
     create_club: 'Create New Club',
     club_directory: 'Club Directory',
@@ -789,6 +1220,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     users: 'Registered Users',
     edit_user: selectedEditUser ? `User Profile #${selectedEditUser.id}` : 'Update User Info'
   };
+
+  const liveSelectedDtmMatch = selectedDtmMatch
+    ? matches.find(m => m.id === selectedDtmMatch.id) || selectedDtmMatch
+    : null;
+  const activeDtmRuleForSelected = liveSelectedDtmMatch ? getDtmRuleForMatch(liveSelectedDtmMatch) : undefined;
 
   return (
     <div className="space-y-2.5 pb-6 px-2.5 sm:px-4 pt-2 max-w-5xl mx-auto">
@@ -806,18 +1242,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     {pageTitleMap.hub}
                   </h2>
                   <p className="text-[10px] sm:text-[11px] text-zinc-400 truncate">
-                    Clubs, leagues, fixtures, deposits &amp; profiles
+                    Clubs, leagues, fixtures &amp; accounts
                   </p>
                 </div>
               </div>
 
               <button
                 type="button"
-                onClick={() => handleOpenPage('profile')}
-                className="h-8 px-2.5 rounded-lg bg-[#062416] hover:bg-[#0e4425] border border-[#00e700]/35 text-[#00e700] text-xs font-bold flex items-center gap-1.5 transition-all active:scale-95 shrink-0 whitespace-nowrap"
+                onClick={() => handleOpenPage('dtm_search')}
+                className="h-8 px-2.5 rounded-lg bg-[#062416] hover:bg-[#0e4425] border border-[#00e700]/45 text-[#00e700] text-xs font-black flex items-center gap-1.5 transition-all active:scale-95 shrink-0 whitespace-nowrap"
               >
-                <User className="w-3.5 h-3.5" />
-                <span>Profile</span>
+                <SlidersHorizontal className="w-3.5 h-3.5" />
+                <span>DTM</span>
               </button>
             </div>
 
@@ -897,7 +1333,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             <div className="flex items-center gap-2 min-w-0">
               <button
                 type="button"
-                onClick={() => handleOpenPage(activePage === 'edit_user' ? 'users' : 'hub')}
+                onClick={() =>
+                  handleOpenPage(
+                    activePage === 'edit_user'
+                      ? 'users'
+                      : activePage === 'dtm_bookmaker'
+                      ? 'dtm_search'
+                      : 'hub'
+                  )
+                }
                 className="h-7 px-2.5 rounded-lg bg-[#062416] hover:bg-[#0e4425] border border-[#00e700]/35 text-[11px] font-bold text-[#00e700] flex items-center gap-1 transition-all active:scale-95 shrink-0 whitespace-nowrap"
               >
                 <ArrowLeft className="w-3.5 h-3.5" />
@@ -1146,137 +1590,728 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         </div>
       )}
 
-      {/* ADMIN PROFILE PAGE */}
-      {activePage === 'profile' && (
+      {/* PAGE: DTM SOCCER MATCH SEARCH */}
+      {activePage === 'dtm_search' && (
         <div className="space-y-2.5">
-          <div className="bg-[#051c10]/95 border border-[#00e700]/25 rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
-            <div className="flex items-center gap-2.5 min-w-0">
-              <div className="w-10 h-10 rounded-xl bg-[#03150b] border border-[#00e700]/40 flex items-center justify-center text-xl shrink-0">
-                🛡️
+          <form onSubmit={handleDtmSearchSubmit} className="bg-[#051c10]/95 border border-[#00e700]/25 rounded-xl p-2.5 sm:p-3 space-y-2">
+            <label className="text-[11px] font-black text-white block">
+              Search Soccer Match
+            </label>
+            <div className="flex items-center gap-1.5">
+              <div className="flex-1 flex items-center bg-[#03150b] border border-[#00e700]/35 focus-within:border-[#00e700] rounded-lg px-2.5 h-9 min-w-0">
+                <Search className="w-3.5 h-3.5 text-[#00e700] mr-1.5 shrink-0" />
+                <input
+                  type="text"
+                  value={dtmSearchQuery}
+                  onChange={e => {
+                    setDtmSearchQuery(e.target.value);
+                    if (dtmSearchError) setDtmSearchError(null);
+                  }}
+                  placeholder="Enter club name, league, or match ID..."
+                  className="bg-transparent text-xs font-bold text-white placeholder-zinc-500 focus:outline-none w-full min-w-0"
+                />
               </div>
+              <button
+                type="submit"
+                disabled={dtmIsVerifying}
+                className="h-9 px-3 rounded-lg bg-gradient-to-r from-[#00ad3a] to-[#00e700] text-black font-black text-xs whitespace-nowrap active:scale-95 transition-all disabled:opacity-50 shrink-0"
+              >
+                {dtmIsVerifying ? 'Verifying...' : 'Search'}
+              </button>
+            </div>
+
+            {dtmSearchError && (
+              <div className="bg-red-950/70 border border-red-600/50 text-red-200 text-[11px] font-bold px-2.5 py-2 rounded-lg flex items-center gap-1.5">
+                <AlertTriangle className="w-3.5 h-3.5 text-red-400 shrink-0" />
+                <span>{dtmSearchError}</span>
+              </div>
+            )}
+          </form>
+
+          {dtmHasSearched && !dtmIsVerifying && dtmVerifiedMatches.length > 0 && (
+            <div className="bg-[#051c10]/95 border border-[#00e700]/30 rounded-xl p-2.5 sm:p-3 space-y-2">
+              <div className="flex items-center justify-between gap-2 border-b border-[#00e700]/15 pb-1.5">
+                <span className="text-[11px] font-black text-[#00e700] flex items-center gap-1">
+                  <CheckCircle className="w-3.5 h-3.5 shrink-0" />
+                  <span>Verified Matches ({dtmVerifiedMatches.length})</span>
+                </span>
+                <span className="text-[10px] text-zinc-400">Select match</span>
+              </div>
+
+              <div className="space-y-1.5 max-h-[45vh] overflow-y-auto pr-0.5">
+                {dtmVerifiedMatches.map(m => {
+                  const rule = getDtmRuleForMatch(m);
+                  return (
+                    <button
+                      key={m.id}
+                      type="button"
+                      onClick={() => openDtmBookmaker(m)}
+                      className="w-full text-left bg-[#062416] hover:bg-[#0b3a23] border border-[#00e700]/25 hover:border-[#00e700] rounded-lg p-2.5 flex items-center justify-between gap-2 transition-all active:scale-[0.99]"
+                    >
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5 text-[10px] text-zinc-400 font-bold">
+                          <span className="truncate">{m.league}</span>
+                          <span>·</span>
+                          <span className={m.status === 'LIVE' ? 'text-[#00e700]' : 'text-amber-300'}>
+                            {m.status === 'LIVE'
+                              ? m.isZoom
+                                ? `${m.elapsedSeconds ?? 1}s/90s`
+                                : `${m.minute}'`
+                              : m.scheduledTime}
+                          </span>
+                        </div>
+                        <div className="text-xs font-black text-white truncate mt-0.5">
+                          {m.homeTeam} vs {m.awayTeam}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {rule && (
+                          <span
+                            className={`text-[10px] font-black px-1.5 py-0.5 rounded whitespace-nowrap ${
+                              rule.enabled
+                                ? 'bg-[#00e700]/20 text-[#00e700] border border-[#00e700]/40'
+                                : 'bg-zinc-800 text-zinc-400 border border-zinc-700'
+                            }`}
+                          >
+                            {rule.enabled ? 'Active' : 'Off'}
+                          </span>
+                        )}
+                        <ChevronRight className="w-4 h-4 text-[#00e700]" />
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Active & Saved Match Targets */}
+          {dtmRules.length > 0 && (
+            <div className="bg-[#051c10]/95 border border-[#00e700]/25 rounded-xl p-2.5 sm:p-3 space-y-2">
+              <div className="flex items-center justify-between border-b border-[#00e700]/15 pb-1.5">
+                <span className="text-[11px] font-black text-white">
+                  Saved Matches ({dtmRules.length})
+                </span>
+                <span className="text-[10px] text-zinc-400">Active until disabled</span>
+              </div>
+              <div className="space-y-1.5 max-h-[38vh] overflow-y-auto pr-0.5">
+                {dtmRules.map(rule => {
+                  const matchedFixture =
+                    matches.find(m => m.id === rule.matchId) ||
+                    matches.find(
+                      m =>
+                        m.homeTeam.toLowerCase() === rule.homeTeam.toLowerCase() &&
+                        m.awayTeam.toLowerCase() === rule.awayTeam.toLowerCase()
+                    );
+                  const summaryParts: string[] = [];
+                  if (typeof rule.correctScoreHome === 'number' && typeof rule.correctScoreAway === 'number') {
+                    summaryParts.push(`CS ${rule.correctScoreHome}:${rule.correctScoreAway}`);
+                  }
+                  if (rule.winner1X2) summaryParts.push(rule.winner1X2);
+                  if (rule.firstGoal) summaryParts.push(`1G ${rule.firstGoal}`);
+                  if (rule.fiveMinGoal) summaryParts.push(`5m ${rule.fiveMinGoal}`);
+                  if (rule.oddEven) summaryParts.push(rule.oddEven);
+                  if (rule.firstHalf) summaryParts.push(`1H ${rule.firstHalf}`);
+                  if (rule.firstHalfOU15) summaryParts.push(`1H ${rule.firstHalfOU15}`);
+                  if (rule.secondHalf) summaryParts.push(`2H ${rule.secondHalf}`);
+                  if (rule.overUnderPick && rule.overUnderLine) {
+                    summaryParts.push(
+                      `${rule.overUnderPick} ${rule.overUnderLine}${
+                        typeof rule.overUnderTargetGoals === 'number' ? ` (${rule.overUnderTargetGoals})` : ''
+                      }`
+                    );
+                  }
+
+                  return (
+                    <div
+                      key={rule.id}
+                      className="bg-[#062416] border border-[#00e700]/20 rounded-lg p-2 flex flex-col sm:flex-row sm:items-center justify-between gap-2"
+                    >
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-xs font-black text-white truncate">
+                            {rule.homeTeam} vs {rule.awayTeam}
+                          </span>
+                          <span
+                            className={`text-[9.5px] font-black px-1.5 py-0.5 rounded shrink-0 ${
+                              rule.enabled
+                                ? 'bg-[#00ad3a]/25 text-[#00e700] border border-[#00e700]/40'
+                                : 'bg-zinc-800 text-zinc-400 border border-zinc-700'
+                            }`}
+                          >
+                            {rule.enabled ? 'ACTIVE' : 'DISABLED'}
+                          </span>
+                        </div>
+                        <span className="text-[10px] text-zinc-400 block truncate mt-0.5">
+                          {summaryParts.length > 0 ? summaryParts.join(' · ') : rule.league}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center gap-1 shrink-0">
+                        {matchedFixture && (
+                          <button
+                            type="button"
+                            onClick={() => openDtmBookmaker(matchedFixture)}
+                            className="h-7 px-2 rounded-md bg-[#03150b] hover:bg-[#0e4425] border border-[#00e700]/35 text-[#00e700] text-[10px] font-black whitespace-nowrap"
+                          >
+                            Edit
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          disabled={isSubmitting}
+                          onClick={() => handleToggleDtmRule(rule)}
+                          className={`h-7 px-2 rounded-md text-[10px] font-black whitespace-nowrap flex items-center gap-1 ${
+                            rule.enabled
+                              ? 'bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40'
+                              : 'bg-[#00ad3a] hover:bg-[#00c844] text-black'
+                          }`}
+                        >
+                          <Power className="w-3 h-3" />
+                          <span>{rule.enabled ? 'Disable' : 'Enable'}</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isSubmitting}
+                          onClick={() => handleDeleteDtmRule(rule.id)}
+                          aria-label="Remove target"
+                          className="h-7 px-2 rounded-md bg-red-950/60 hover:bg-red-900 text-red-300 border border-red-700/50"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Quick Verified Upcoming & Live List */}
+          {!dtmHasSearched && matches.length > 0 && (
+            <div className="bg-[#051c10]/95 border border-[#00e700]/20 rounded-xl p-2.5 sm:p-3 space-y-2">
+              <span className="text-[11px] font-black text-zinc-300 block border-b border-[#00e700]/15 pb-1.5">
+                Soccer Fixtures ({matches.length})
+              </span>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-h-[42vh] overflow-y-auto pr-0.5">
+                {matches.slice(0, 20).map(m => {
+                  const rule = getDtmRuleForMatch(m);
+                  return (
+                    <button
+                      key={m.id}
+                      type="button"
+                      onClick={() => openDtmBookmaker(m)}
+                      className="text-left bg-[#062416] hover:bg-[#0b3a23] border border-[#00e700]/20 hover:border-[#00e700] rounded-lg p-2 flex items-center justify-between gap-2 transition-all active:scale-[0.99]"
+                    >
+                      <div className="min-w-0">
+                        <span className="text-[9.5px] text-zinc-400 font-semibold block truncate">
+                          {m.league} · {m.status === 'LIVE' ? 'LIVE' : m.scheduledTime}
+                        </span>
+                        <span className="text-[11px] font-black text-white block truncate">
+                          {m.homeTeam} vs {m.awayTeam}
+                        </span>
+                      </div>
+                      {rule?.enabled ? (
+                        <span className="text-[9.5px] font-black px-1.5 py-0.5 rounded bg-[#00e700]/20 text-[#00e700] border border-[#00e700]/40 shrink-0">
+                          Active
+                        </span>
+                      ) : (
+                        <ChevronRight className="w-3.5 h-3.5 text-[#00e700] shrink-0" />
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* PAGE: DTM BOOKMAKER OPTIONS */}
+      {activePage === 'dtm_bookmaker' && liveSelectedDtmMatch && (
+        <div className="space-y-2.5">
+          {/* Match Header & Active Status */}
+          <div className="bg-gradient-to-b from-[#0a331c] to-[#051c10] border border-[#00e700]/30 rounded-xl p-2.5 sm:p-3 space-y-2">
+            <div className="flex items-start justify-between gap-2">
               <div className="min-w-0">
-                <h3 className="text-sm font-black text-white truncate">CAS9i Admin</h3>
-                <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-zinc-400">
-                  <span className="truncate">{adminEmail}</span>
-                  <span aria-hidden="true">·</span>
-                  <span className="font-mono font-bold text-[#00e700] tabular-nums">
-                    ${adminBalance.toFixed(2)}
+                <span className="text-[10px] text-zinc-400 font-bold block truncate">
+                  {liveSelectedDtmMatch.league} · Round #{liveSelectedDtmMatch.roundNumber || 1}
+                </span>
+                <h3 className="text-xs sm:text-sm font-black text-white truncate">
+                  {liveSelectedDtmMatch.homeTeam} vs {liveSelectedDtmMatch.awayTeam}
+                </h3>
+                <span className="text-[10px] font-bold text-amber-300 tabular-nums">
+                  {liveSelectedDtmMatch.status === 'LIVE'
+                    ? `${liveSelectedDtmMatch.homeScore} - ${liveSelectedDtmMatch.awayScore} · ${
+                        liveSelectedDtmMatch.isZoom
+                          ? `${liveSelectedDtmMatch.elapsedSeconds ?? 1}s/90s`
+                          : `${liveSelectedDtmMatch.minute}'/60'`
+                      }`
+                    : liveSelectedDtmMatch.scheduledTime}
+                </span>
+              </div>
+
+              {activeDtmRuleForSelected && (
+                <div className="flex items-center gap-1 shrink-0">
+                  <button
+                    type="button"
+                    disabled={isSubmitting}
+                    onClick={() => handleToggleDtmRule(activeDtmRuleForSelected)}
+                    className={`h-7 px-2.5 rounded-lg text-[10px] font-black flex items-center gap-1 whitespace-nowrap transition-all ${
+                      activeDtmRuleForSelected.enabled
+                        ? 'bg-[#00ff44] text-black shadow-[0_0_10px_rgba(0,231,0,0.35)]'
+                        : 'bg-zinc-800 text-zinc-300 border border-zinc-700'
+                    }`}
+                  >
+                    <Power className="w-3 h-3" />
+                    <span>{activeDtmRuleForSelected.enabled ? 'Disable' : 'Enable'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isSubmitting}
+                    onClick={() => handleDeleteDtmRule(activeDtmRuleForSelected.id)}
+                    aria-label="Clear match target"
+                    className="h-7 px-2 rounded-lg bg-red-950/60 hover:bg-red-900 text-red-300 border border-red-700/50"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {activeDtmRuleForSelected && (
+              <div className="flex flex-wrap gap-1 pt-1 border-t border-[#00e700]/15">
+                {typeof activeDtmRuleForSelected.correctScoreHome === 'number' &&
+                  typeof activeDtmRuleForSelected.correctScoreAway === 'number' && (
+                    <span className="px-2 py-0.5 rounded bg-[#03150b] border border-[#00e700]/40 text-[10px] font-black text-[#00e700] tabular-nums">
+                      Score {activeDtmRuleForSelected.correctScoreHome}:{activeDtmRuleForSelected.correctScoreAway}
+                    </span>
+                  )}
+                {activeDtmRuleForSelected.winner1X2 && (
+                  <span className="px-2 py-0.5 rounded bg-[#03150b] border border-[#00e700]/30 text-[10px] font-bold text-white">
+                    1X2: {activeDtmRuleForSelected.winner1X2}
                   </span>
+                )}
+                {activeDtmRuleForSelected.firstGoal && (
+                  <span className="px-2 py-0.5 rounded bg-[#03150b] border border-[#00e700]/30 text-[10px] font-bold text-white">
+                    1st Goal: {activeDtmRuleForSelected.firstGoal}
+                  </span>
+                )}
+                {activeDtmRuleForSelected.fiveMinGoal && (
+                  <span className="px-2 py-0.5 rounded bg-[#03150b] border border-[#00e700]/30 text-[10px] font-bold text-white">
+                    5m: {activeDtmRuleForSelected.fiveMinGoal}
+                  </span>
+                )}
+                {activeDtmRuleForSelected.oddEven && (
+                  <span className="px-2 py-0.5 rounded bg-[#03150b] border border-[#00e700]/30 text-[10px] font-bold text-white">
+                    {activeDtmRuleForSelected.oddEven}
+                  </span>
+                )}
+                {activeDtmRuleForSelected.firstHalf && (
+                  <span className="px-2 py-0.5 rounded bg-[#03150b] border border-[#00e700]/30 text-[10px] font-bold text-white">
+                    1H: {activeDtmRuleForSelected.firstHalf}
+                  </span>
+                )}
+                {activeDtmRuleForSelected.firstHalfOU15 && (
+                  <span className="px-2 py-0.5 rounded bg-[#03150b] border border-[#00e700]/30 text-[10px] font-bold text-white">
+                    1H {activeDtmRuleForSelected.firstHalfOU15}
+                  </span>
+                )}
+                {activeDtmRuleForSelected.secondHalf && (
+                  <span className="px-2 py-0.5 rounded bg-[#03150b] border border-[#00e700]/30 text-[10px] font-bold text-white">
+                    2H: {activeDtmRuleForSelected.secondHalf}
+                  </span>
+                )}
+                {activeDtmRuleForSelected.overUnderPick && activeDtmRuleForSelected.overUnderLine && (
+                  <span className="px-2 py-0.5 rounded bg-[#03150b] border border-[#00e700]/30 text-[10px] font-bold text-white">
+                    {activeDtmRuleForSelected.overUnderPick} {activeDtmRuleForSelected.overUnderLine}
+                    {typeof activeDtmRuleForSelected.overUnderTargetGoals === 'number'
+                      ? ` (${activeDtmRuleForSelected.overUnderTargetGoals}g)`
+                      : ''}
+                  </span>
+                )}
+              </div>
+            )}
+
+            {/* Filter Tabs */}
+            <div className="grid grid-cols-5 gap-1 pt-0.5">
+              {[
+                { id: 'ALL', label: 'All (8)' },
+                { id: '1X2', label: 'Main' },
+                { id: 'HALVES', label: 'Halves' },
+                { id: 'OU', label: 'O/U' },
+                { id: 'SCORE', label: 'Score' },
+              ].map(tab => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => {
+                    soundManager.playClick();
+                    setDtmMarketTab(tab.id as 'ALL' | '1X2' | 'HALVES' | 'OU' | 'SCORE');
+                  }}
+                  className={`py-1.5 px-1 rounded-lg text-[10px] sm:text-[11px] font-black transition-all whitespace-nowrap text-center truncate ${
+                    dtmMarketTab === tab.id
+                      ? 'bg-[#00ad3a] text-black shadow-[0_0_8px_rgba(0,231,0,0.3)]'
+                      : 'bg-[#03150b] text-zinc-300 hover:text-white border border-zinc-800'
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* 1-4: Main Markets */}
+          {(dtmMarketTab === 'ALL' || dtmMarketTab === '1X2') && (
+            <div className="space-y-2">
+              <div className="bg-[#062416] p-2.5 rounded-xl border border-[#00e700]/20 space-y-1.5">
+                <span className="text-[11px] font-black text-white uppercase tracking-wider block">
+                  1. 1X2 (High Goals)
+                </span>
+                <div className="grid grid-cols-3 gap-1.5">
+                  {[
+                    { label: 'Home & O15', odds: liveSelectedDtmMatch.odds.home },
+                    { label: 'Draw', odds: liveSelectedDtmMatch.odds.draw },
+                    { label: 'Away & O15', odds: liveSelectedDtmMatch.odds.away },
+                  ].map(opt => {
+                    const selected = activeDtmRuleForSelected?.winner1X2 === opt.label;
+                    return (
+                      <button
+                        key={opt.label}
+                        type="button"
+                        onClick={() => openDtmOptionModal(liveSelectedDtmMatch, '1X2', '1X2', opt.label)}
+                        className={`py-2 px-1 min-h-[42px] rounded-xl text-center transition-all flex flex-col items-center justify-center ${
+                          selected
+                            ? 'bg-[#00ff44] text-black font-black ring-2 ring-white shadow-[0_0_10px_#00e700]'
+                            : 'bg-[#00ad3a] hover:bg-[#00c844] text-white'
+                        }`}
+                      >
+                        <span className="text-[10px] sm:text-[11px] font-bold leading-tight whitespace-nowrap">
+                          {opt.label}
+                        </span>
+                        <span className="text-xs font-black tabular-nums leading-tight mt-0.5">
+                          {opt.odds.toFixed(2)}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="bg-[#062416] p-2.5 rounded-xl border border-[#00e700]/20 space-y-1.5">
+                <span className="text-[11px] font-black text-white uppercase tracking-wider block">
+                  2. 1st Goal
+                </span>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {[
+                    { key: 'Home', label: `Home · ${liveSelectedDtmMatch.homeTeam}`, odds: liveSelectedDtmMatch.odds.firstGoalHome },
+                    { key: 'Away', label: `Away · ${liveSelectedDtmMatch.awayTeam}`, odds: liveSelectedDtmMatch.odds.firstGoalAway },
+                  ].map(opt => {
+                    const selected = activeDtmRuleForSelected?.firstGoal === opt.key;
+                    return (
+                      <button
+                        key={opt.key}
+                        type="button"
+                        onClick={() => openDtmOptionModal(liveSelectedDtmMatch, '1st Goal', '1st Goal', opt.key)}
+                        className={`py-2 px-2 min-h-[42px] rounded-xl text-center transition-all flex flex-col items-center justify-center min-w-0 ${
+                          selected
+                            ? 'bg-[#00ff44] text-black font-black ring-2 ring-white shadow-[0_0_10px_#00e700]'
+                            : 'bg-[#00ad3a] hover:bg-[#00c844] text-white'
+                        }`}
+                      >
+                        <span className="text-[10px] sm:text-[11px] font-bold leading-tight truncate max-w-full">
+                          {opt.label}
+                        </span>
+                        <span className="text-xs font-black tabular-nums leading-tight mt-0.5">
+                          {opt.odds.toFixed(2)}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="bg-[#062416] p-2.5 rounded-xl border border-[#00e700]/20 space-y-1.5">
+                <span className="text-[11px] font-black text-white uppercase tracking-wider block">
+                  3. 5 Minutes Goal
+                </span>
+                <div className="grid grid-cols-3 gap-1.5">
+                  {[
+                    { label: 'Yes', odds: liveSelectedDtmMatch.odds.fiveMinYes },
+                    { label: 'No', odds: liveSelectedDtmMatch.odds.fiveMinNo },
+                    { label: 'Over 5 Goals', odds: liveSelectedDtmMatch.odds.fiveMinOver5 },
+                  ].map(opt => {
+                    const selected = activeDtmRuleForSelected?.fiveMinGoal === opt.label;
+                    return (
+                      <button
+                        key={opt.label}
+                        type="button"
+                        onClick={() => openDtmOptionModal(liveSelectedDtmMatch, '5 Min Goal', '5 Min Goal', opt.label)}
+                        className={`py-2 px-1 min-h-[42px] rounded-xl text-center transition-all flex flex-col items-center justify-center ${
+                          selected
+                            ? 'bg-[#00ff44] text-black font-black ring-2 ring-white shadow-[0_0_10px_#00e700]'
+                            : 'bg-[#00ad3a] hover:bg-[#00c844] text-white'
+                        }`}
+                      >
+                        <span className="text-[10px] sm:text-[11px] font-bold leading-tight whitespace-nowrap">
+                          {opt.label}
+                        </span>
+                        <span className="text-xs font-black tabular-nums leading-tight mt-0.5">
+                          {opt.odds.toFixed(2)}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="bg-[#062416] p-2.5 rounded-xl border border-[#00e700]/20 space-y-1.5">
+                <span className="text-[11px] font-black text-white uppercase tracking-wider block">
+                  4. Odd or Even (Total Goals)
+                </span>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {[
+                    { label: 'Odd', odds: liveSelectedDtmMatch.odds.oddGoals },
+                    { label: 'Even', odds: liveSelectedDtmMatch.odds.evenGoals },
+                  ].map(opt => {
+                    const selected = activeDtmRuleForSelected?.oddEven === opt.label;
+                    return (
+                      <button
+                        key={opt.label}
+                        type="button"
+                        onClick={() => openDtmOptionModal(liveSelectedDtmMatch, 'Odd/Even', 'Odd/Even', opt.label)}
+                        className={`py-2 px-2 min-h-[42px] rounded-xl text-center transition-all flex flex-col items-center justify-center ${
+                          selected
+                            ? 'bg-[#00ff44] text-black font-black ring-2 ring-white shadow-[0_0_10px_#00e700]'
+                            : 'bg-[#00ad3a] hover:bg-[#00c844] text-white'
+                        }`}
+                      >
+                        <span className="text-[10px] sm:text-[11px] font-bold leading-tight whitespace-nowrap">
+                          {opt.label}
+                        </span>
+                        <span className="text-xs font-black tabular-nums leading-tight mt-0.5">
+                          {opt.odds.toFixed(2)}
+                        </span>
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
             </div>
+          )}
 
-            <div className="flex flex-wrap items-center gap-1.5 shrink-0">
-              <button
-                type="button"
-                onClick={() => handleOpenPage('deposit')}
-                className="h-8 px-2.5 rounded-lg bg-[#00ad3a] hover:bg-[#00c844] text-black font-black text-[11px] flex items-center gap-1 whitespace-nowrap"
-              >
-                <Wallet className="w-3.5 h-3.5" />
-                <span>Deposit</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => handleOpenPage('users')}
-                className="h-8 px-2.5 rounded-lg bg-[#062416] hover:bg-[#0e4425] border border-[#00e700]/35 text-white font-bold text-[11px] flex items-center gap-1 whitespace-nowrap"
-              >
-                <UserCheck className="w-3.5 h-3.5 text-[#00e700]" />
-                <span>Users ({users.length})</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  soundManager.playClick();
-                  onLogout();
-                }}
-                className="h-8 px-2.5 rounded-lg bg-red-950/60 hover:bg-red-900/80 border border-red-500/40 text-red-200 font-bold text-[11px] flex items-center gap-1 whitespace-nowrap"
-              >
-                <LogOut className="w-3.5 h-3.5" />
-                <span>Logout</span>
-              </button>
-            </div>
-          </div>
-
-          <div className="bg-[#051c10]/95 border border-[#00e700]/25 rounded-xl p-3 space-y-2">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-[#00e700]/15 pb-2">
-              <h3 className="text-xs font-black text-white">User Profiles ({users.length})</h3>
-              <div className="flex items-center bg-[#03150b] border border-zinc-700 rounded-lg px-2.5 h-8">
-                <Search className="w-3.5 h-3.5 text-zinc-400 mr-1.5 shrink-0" />
-                <input
-                  type="text"
-                  value={usersFilter}
-                  onChange={e => setUsersFilter(e.target.value)}
-                  placeholder="Filter ID, username, name..."
-                  className="bg-transparent text-xs text-white placeholder-zinc-500 focus:outline-none w-full sm:w-48"
-                />
-              </div>
-            </div>
-
-            {filteredUsers.length === 0 ? (
-              <p className="text-xs text-zinc-400 py-6 text-center">
-                No verified user profiles yet. New accounts start at $0.00 until deposit.
-              </p>
-            ) : (
-              <div className="space-y-1.5 max-h-[60vh] overflow-y-auto pr-0.5">
-                {filteredUsers.map(u => (
-                  <div
-                    key={u.id}
-                    className="bg-[#062416] border border-[#00e700]/20 rounded-lg p-2 flex flex-col sm:flex-row sm:items-center justify-between gap-2"
-                  >
-                    <div className="flex items-center gap-2 min-w-0">
-                      <div className="w-8 h-8 rounded-lg bg-[#03150b] border border-[#00e700]/30 flex items-center justify-center text-base shrink-0">
-                        {u.avatar}
-                      </div>
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          <span className="text-xs font-black text-white truncate">{u.fullName}</span>
-                          <span className="text-[11px] font-mono font-bold text-[#00e700] tabular-nums">#{u.id}</span>
-                          <span className="text-[11px] text-zinc-400 truncate">@{u.username}</span>
-                        </div>
-                        <div className="flex items-center gap-1.5 text-[10px] text-zinc-400 flex-wrap">
-                          <span className="font-mono font-bold text-[#00e700] tabular-nums">
-                            ${u.balance.toFixed(2)}
-                          </span>
-                          <span aria-hidden="true">·</span>
-                          <span className="tabular-nums">
-                            {(u.placedBetsCount ?? 0) + (u.fxPositionsCount ?? 0)} bets
-                          </span>
-                          <span aria-hidden="true">·</span>
-                          <span>{u.accountTier || 'Standard'}</span>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-1.5 shrink-0">
+          {/* 5-6: Halves */}
+          {(dtmMarketTab === 'ALL' || dtmMarketTab === 'HALVES') && (
+            <div className="space-y-2">
+              <div className="bg-[#062416] p-2.5 rounded-xl border border-[#00e700]/20 space-y-2">
+                <span className="text-[11px] font-black text-white uppercase tracking-wider block">
+                  {liveSelectedDtmMatch.isZoom ? '5. 1st Half (0s - 45s)' : "5. 1st Half (0' - 30')"}
+                </span>
+                <div className="grid grid-cols-3 gap-1.5">
+                  {[
+                    { label: 'Home & O10', odds: liveSelectedDtmMatch.odds.ht1Over10 },
+                    { label: 'X & O10', odds: liveSelectedDtmMatch.odds.htXOver10 },
+                    { label: 'Away & O10', odds: liveSelectedDtmMatch.odds.ht2Over10 },
+                  ].map(opt => {
+                    const selected = activeDtmRuleForSelected?.firstHalf === opt.label;
+                    return (
                       <button
+                        key={opt.label}
                         type="button"
-                        onClick={() => openEditUserPage(u)}
-                        className="h-7 px-2.5 rounded-md bg-[#00ad3a] hover:bg-[#00c844] text-black text-[11px] font-black flex items-center gap-1 whitespace-nowrap"
+                        onClick={() => openDtmOptionModal(liveSelectedDtmMatch, '1st Half', '1st Half', opt.label)}
+                        className={`py-2 px-1 min-h-[42px] rounded-xl text-center transition-all flex flex-col items-center justify-center ${
+                          selected
+                            ? 'bg-[#00ff44] text-black font-black ring-2 ring-white shadow-[0_0_10px_#00e700]'
+                            : 'bg-[#00ad3a] hover:bg-[#00c844] text-white'
+                        }`}
                       >
-                        <Edit3 className="w-3 h-3" />
-                        <span>Update</span>
+                        <span className="text-[10px] sm:text-[11px] font-bold leading-tight whitespace-nowrap">
+                          {opt.label}
+                        </span>
+                        <span className="text-xs font-black tabular-nums leading-tight mt-0.5">
+                          {opt.odds.toFixed(2)}
+                        </span>
                       </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          soundManager.playClick();
-                          setDepositRecipient(u);
-                          setDepositSearchId(u.id);
-                          setDepositError(null);
-                          setDepositSuccessMsg(null);
-                          handleOpenPage('deposit');
-                        }}
-                        className="h-7 px-2.5 rounded-md bg-[#03150b] hover:bg-[#0a2f1c] border border-[#00e700]/35 text-[#00e700] text-[11px] font-bold flex items-center gap-1 whitespace-nowrap"
-                      >
-                        <Wallet className="w-3 h-3" />
-                        <span>Deposit</span>
-                      </button>
-                    </div>
+                    );
+                  })}
+                </div>
+
+                <div className="pt-1.5 border-t border-[#00e700]/15">
+                  <span className="text-[10px] font-bold text-zinc-300 uppercase block mb-1.5">
+                    1st Half Over / Under 15
+                  </span>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {[
+                      { label: 'Over 15', odds: liveSelectedDtmMatch.odds.htOver15 },
+                      { label: 'Under 15', odds: liveSelectedDtmMatch.odds.htUnder15 },
+                    ].map(opt => {
+                      const selected = activeDtmRuleForSelected?.firstHalfOU15 === opt.label;
+                      return (
+                        <button
+                          key={opt.label}
+                          type="button"
+                          onClick={() =>
+                            openDtmOptionModal(liveSelectedDtmMatch, '1st Half', '1st Half O/U 15', opt.label)
+                          }
+                          className={`py-2 px-2 min-h-[42px] rounded-xl text-center transition-all flex flex-col items-center justify-center ${
+                            selected
+                              ? 'bg-[#00ff44] text-black font-black ring-2 ring-white shadow-[0_0_10px_#00e700]'
+                              : 'bg-[#08381d] hover:bg-[#0d4d29] border border-[#00e700]/30 text-white'
+                          }`}
+                        >
+                          <span className="text-[10px] sm:text-[11px] font-bold leading-tight whitespace-nowrap">
+                            {opt.label}
+                          </span>
+                          <span className="text-xs font-black tabular-nums leading-tight mt-0.5">
+                            {opt.odds.toFixed(2)}
+                          </span>
+                        </button>
+                      );
+                    })}
                   </div>
-                ))}
+                </div>
               </div>
-            )}
-          </div>
+
+              <div className="bg-[#062416] p-2.5 rounded-xl border border-[#00e700]/20 space-y-1.5">
+                <span className="text-[11px] font-black text-white uppercase tracking-wider block">
+                  {liveSelectedDtmMatch.isZoom ? '6. 2nd Half (46s - 90s)' : "6. 2nd Half (31' - 60')"}
+                </span>
+                <div className="grid grid-cols-3 gap-1.5">
+                  {[
+                    { label: 'Home & O15', odds: liveSelectedDtmMatch.odds.sh1Over15 },
+                    { label: 'X & O15', odds: liveSelectedDtmMatch.odds.shXOver15 },
+                    { label: 'Away & O15', odds: liveSelectedDtmMatch.odds.sh2Over15 },
+                  ].map(opt => {
+                    const selected = activeDtmRuleForSelected?.secondHalf === opt.label;
+                    return (
+                      <button
+                        key={opt.label}
+                        type="button"
+                        onClick={() => openDtmOptionModal(liveSelectedDtmMatch, '2nd Half', '2nd Half', opt.label)}
+                        className={`py-2 px-1 min-h-[42px] rounded-xl text-center transition-all flex flex-col items-center justify-center ${
+                          selected
+                            ? 'bg-[#00ff44] text-black font-black ring-2 ring-white shadow-[0_0_10px_#00e700]'
+                            : 'bg-[#00ad3a] hover:bg-[#00c844] text-white'
+                        }`}
+                      >
+                        <span className="text-[10px] sm:text-[11px] font-bold leading-tight whitespace-nowrap">
+                          {opt.label}
+                        </span>
+                        <span className="text-xs font-black tabular-nums leading-tight mt-0.5">
+                          {opt.odds.toFixed(2)}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* 7: Over & Under 15-30 */}
+          {(dtmMarketTab === 'ALL' || dtmMarketTab === 'OU') && (
+            <div className="bg-[#062416] p-2.5 rounded-xl border border-[#00e700]/20 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] font-black text-white uppercase tracking-wider">
+                  7. Over &amp; Under (15 - 30)
+                </span>
+                <span className="text-[10px] font-bold text-[#00e700] whitespace-nowrap">Odds 2.00 - 18.75</span>
+              </div>
+              <div className="space-y-1.5">
+                {(liveSelectedDtmMatch.odds.overUnderLines || []).map(item => {
+                  const overSel = `Over ${item.line}`;
+                  const underSel = `Under ${item.line}`;
+                  const overActive =
+                    activeDtmRuleForSelected?.overUnderLine === item.line &&
+                    activeDtmRuleForSelected?.overUnderPick === 'Over';
+                  const underActive =
+                    activeDtmRuleForSelected?.overUnderLine === item.line &&
+                    activeDtmRuleForSelected?.overUnderPick === 'Under';
+
+                  return (
+                    <div key={item.line} className="grid grid-cols-2 gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          openDtmOptionModal(liveSelectedDtmMatch, 'Over/Under', `O/U ${item.line}`, overSel)
+                        }
+                        className={`px-3 py-2 min-h-[40px] rounded-xl flex items-center justify-between transition-all ${
+                          overActive
+                            ? 'bg-[#00ff44] text-black font-black ring-2 ring-white shadow-[0_0_10px_#00e700]'
+                            : 'bg-[#00ad3a] hover:bg-[#00c844] text-white'
+                        }`}
+                      >
+                        <span className="text-[11px] font-bold whitespace-nowrap">{overSel}</span>
+                        <span className="text-xs font-black tabular-nums">{item.over.toFixed(2)}</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          openDtmOptionModal(liveSelectedDtmMatch, 'Over/Under', `O/U ${item.line}`, underSel)
+                        }
+                        className={`px-3 py-2 min-h-[40px] rounded-xl flex items-center justify-between transition-all ${
+                          underActive
+                            ? 'bg-[#00ff44] text-black font-black ring-2 ring-white shadow-[0_0_10px_#00e700]'
+                            : 'bg-[#00ad3a] hover:bg-[#00c844] text-white'
+                        }`}
+                      >
+                        <span className="text-[11px] font-bold whitespace-nowrap">{underSel}</span>
+                        <span className="text-xs font-black tabular-nums">{item.under.toFixed(2)}</span>
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* 8: Correct Score */}
+          {(dtmMarketTab === 'ALL' || dtmMarketTab === 'SCORE') && (
+            <div className="bg-[#062416] p-2.5 rounded-xl border border-[#00e700]/20 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] font-black text-white uppercase tracking-wider">
+                  8. Correct Score
+                </span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    openDtmOptionModal(liveSelectedDtmMatch, 'Correct Score', 'Correct Score', 'Custom Score')
+                  }
+                  className="h-6 px-2 rounded-md bg-[#03150b] hover:bg-[#0e4425] border border-[#00e700]/40 text-[#00e700] text-[10px] font-black whitespace-nowrap"
+                >
+                  + Custom Score
+                </button>
+              </div>
+              <div className="grid grid-cols-3 gap-1.5">
+                {(liveSelectedDtmMatch.odds.correctScores || []).map(cs => {
+                  const selected =
+                    typeof activeDtmRuleForSelected?.correctScoreHome === 'number' &&
+                    typeof activeDtmRuleForSelected?.correctScoreAway === 'number' &&
+                    `${activeDtmRuleForSelected.correctScoreHome}:${activeDtmRuleForSelected.correctScoreAway}` === cs.score;
+                  return (
+                    <button
+                      key={cs.score}
+                      type="button"
+                      onClick={() =>
+                        openDtmOptionModal(liveSelectedDtmMatch, 'Correct Score', 'Correct Score', cs.score)
+                      }
+                      className={`py-2 px-1 min-h-[42px] rounded-xl text-center transition-all flex flex-col items-center justify-center ${
+                        selected
+                          ? 'bg-[#00ff44] text-black font-black ring-2 ring-white shadow-[0_0_10px_#00e700]'
+                          : 'bg-[#00ad3a] hover:bg-[#00c844] text-white'
+                      }`}
+                    >
+                      <span className="text-xs font-black block leading-tight tabular-nums">{cs.score}</span>
+                      <span className="text-[10.5px] font-bold tabular-nums opacity-95 leading-tight mt-0.5">
+                        {cs.odds.toFixed(2)}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -2617,6 +3652,371 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 >
                   <Plus className="w-4 h-4 stroke-[2.75]" />
                   <span>{isSubmitting ? 'Saving...' : 'Save Custom League'}</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* POP-OUT MODAL: DTM RESULT INPUT BOX */}
+      {dtmModal && liveSelectedDtmMatch && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 bg-black/80 backdrop-blur-md">
+          <div className="relative w-full max-w-md bg-[#051c11] border border-[#00e700]/40 rounded-2xl shadow-[0_0_35px_rgba(0,231,0,0.22)] overflow-hidden">
+            <div className="flex items-center justify-between gap-2 px-3.5 py-2.5 bg-[#03150b] border-b border-[#00e700]/20">
+              <div className="min-w-0">
+                <span className="text-[10px] font-bold text-[#00e700] block truncate">
+                  {liveSelectedDtmMatch.homeTeam} vs {liveSelectedDtmMatch.awayTeam}
+                </span>
+                <h3 className="text-xs sm:text-sm font-black text-white truncate">
+                  {dtmModal.marketName} · {dtmModal.optionLabel}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDtmModal(null)}
+                className="p-1.5 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-white shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveDtmModal} className="p-3.5 space-y-3">
+              {dtmModalError && (
+                <div className="bg-red-950/80 border border-red-600/60 text-red-200 text-[11px] font-bold p-2 rounded-lg">
+                  {dtmModalError}
+                </div>
+              )}
+
+              {/* Correct Score Input */}
+              {dtmModal.marketType === 'Correct Score' && (
+                <div className="grid grid-cols-2 gap-2.5">
+                  <div>
+                    <label className="text-[10px] font-bold text-zinc-400 block mb-1 truncate">
+                      {liveSelectedDtmMatch.homeTeam} Score
+                    </label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={99}
+                      required
+                      value={dtmModal.csHome}
+                      onChange={e => setDtmModal(prev => (prev ? { ...prev, csHome: e.target.value } : prev))}
+                      className="w-full h-10 bg-[#03150b] border border-[#00e700]/35 focus:border-[#00e700] rounded-xl px-3 text-base font-black text-amber-400 text-center tabular-nums focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-bold text-zinc-400 block mb-1 truncate">
+                      {liveSelectedDtmMatch.awayTeam} Score
+                    </label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={99}
+                      required
+                      value={dtmModal.csAway}
+                      onChange={e => setDtmModal(prev => (prev ? { ...prev, csAway: e.target.value } : prev))}
+                      className="w-full h-10 bg-[#03150b] border border-[#00e700]/35 focus:border-[#00e700] rounded-xl px-3 text-base font-black text-amber-400 text-center tabular-nums focus:outline-none"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {/* 1X2 Input */}
+              {dtmModal.marketType === '1X2' && (
+                <div className="space-y-2.5">
+                  <div className="grid grid-cols-3 gap-1.5">
+                    {(['Home & O15', 'Draw', 'Away & O15'] as const).map(choice => (
+                      <button
+                        key={choice}
+                        type="button"
+                        onClick={() =>
+                          setDtmModal(prev =>
+                            prev
+                              ? {
+                                  ...prev,
+                                  winner1X2: choice,
+                                  csHome: choice === 'Draw' ? '9' : choice === 'Home & O15' ? '11' : '8',
+                                  csAway: choice === 'Draw' ? '9' : choice === 'Away & O15' ? '11' : '8',
+                                }
+                              : prev
+                          )
+                        }
+                        className={`py-2 px-1 rounded-lg text-[10px] sm:text-[11px] font-black transition-all whitespace-nowrap ${
+                          dtmModal.winner1X2 === choice
+                            ? 'bg-[#00ff44] text-black ring-2 ring-white'
+                            : 'bg-[#03150b] text-zinc-300 border border-zinc-700'
+                        }`}
+                      >
+                        {choice}
+                      </button>
+                    ))}
+                  </div>
+
+                  <label className="flex items-center justify-between bg-[#03150b] border border-zinc-800 rounded-lg px-2.5 py-2 text-[11px] cursor-pointer">
+                    <span className="font-bold text-zinc-300">Set Exact Final Score (Optional)</span>
+                    <input
+                      type="checkbox"
+                      checked={dtmModal.applyOptionalScore}
+                      onChange={e =>
+                        setDtmModal(prev => (prev ? { ...prev, applyOptionalScore: e.target.checked } : prev))
+                      }
+                      className="w-4 h-4 accent-[#00e700]"
+                    />
+                  </label>
+
+                  {dtmModal.applyOptionalScore && (
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="text-[10px] font-bold text-zinc-400 block mb-0.5 truncate">
+                          {liveSelectedDtmMatch.homeTeam} Score
+                        </label>
+                        <input
+                          type="number"
+                          min={0}
+                          max={99}
+                          required
+                          value={dtmModal.csHome}
+                          onChange={e => setDtmModal(prev => (prev ? { ...prev, csHome: e.target.value } : prev))}
+                          className="w-full h-9 bg-[#03150b] border border-[#00e700]/30 rounded-lg px-2 text-sm font-black text-amber-400 text-center tabular-nums focus:outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-[10px] font-bold text-zinc-400 block mb-0.5 truncate">
+                          {liveSelectedDtmMatch.awayTeam} Score
+                        </label>
+                        <input
+                          type="number"
+                          min={0}
+                          max={99}
+                          required
+                          value={dtmModal.csAway}
+                          onChange={e => setDtmModal(prev => (prev ? { ...prev, csAway: e.target.value } : prev))}
+                          className="w-full h-9 bg-[#03150b] border border-[#00e700]/30 rounded-lg px-2 text-sm font-black text-amber-400 text-center tabular-nums focus:outline-none"
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* 1st Goal Input */}
+              {dtmModal.marketType === '1st Goal' && (
+                <div className="grid grid-cols-2 gap-2">
+                  {[
+                    { key: 'Home' as const, label: `Home (${liveSelectedDtmMatch.homeTeam})` },
+                    { key: 'Away' as const, label: `Away (${liveSelectedDtmMatch.awayTeam})` },
+                  ].map(item => (
+                    <button
+                      key={item.key}
+                      type="button"
+                      onClick={() => setDtmModal(prev => (prev ? { ...prev, firstGoal: item.key } : prev))}
+                      className={`py-2.5 px-2 rounded-lg text-[11px] font-black truncate ${
+                        dtmModal.firstGoal === item.key
+                          ? 'bg-[#00ff44] text-black ring-2 ring-white'
+                          : 'bg-[#03150b] text-zinc-300 border border-zinc-700'
+                      }`}
+                    >
+                      {item.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* 5 Min Goal Input */}
+              {dtmModal.marketType === '5 Min Goal' && (
+                <div className="grid grid-cols-3 gap-1.5">
+                  {(['Yes', 'No', 'Over 5 Goals'] as const).map(choice => (
+                    <button
+                      key={choice}
+                      type="button"
+                      onClick={() => setDtmModal(prev => (prev ? { ...prev, fiveMinGoal: choice } : prev))}
+                      className={`py-2.5 px-1 rounded-lg text-[10px] sm:text-[11px] font-black whitespace-nowrap ${
+                        dtmModal.fiveMinGoal === choice
+                          ? 'bg-[#00ff44] text-black ring-2 ring-white'
+                          : 'bg-[#03150b] text-zinc-300 border border-zinc-700'
+                      }`}
+                    >
+                      {choice}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* Odd/Even Input */}
+              {dtmModal.marketType === 'Odd/Even' && (
+                <div className="grid grid-cols-2 gap-2">
+                  {(['Odd', 'Even'] as const).map(choice => (
+                    <button
+                      key={choice}
+                      type="button"
+                      onClick={() => setDtmModal(prev => (prev ? { ...prev, oddEven: choice } : prev))}
+                      className={`py-2.5 px-2 rounded-lg text-xs font-black ${
+                        dtmModal.oddEven === choice
+                          ? 'bg-[#00ff44] text-black ring-2 ring-white'
+                          : 'bg-[#03150b] text-zinc-300 border border-zinc-700'
+                      }`}
+                    >
+                      {choice} Total Goals
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* 1st Half O/U 15 */}
+              {dtmModal.marketName === '1st Half O/U 15' && (
+                <div className="grid grid-cols-2 gap-2">
+                  {(['Over 15', 'Under 15'] as const).map(choice => (
+                    <button
+                      key={choice}
+                      type="button"
+                      onClick={() => setDtmModal(prev => (prev ? { ...prev, firstHalfOU15: choice } : prev))}
+                      className={`py-2.5 px-2 rounded-lg text-xs font-black ${
+                        dtmModal.firstHalfOU15 === choice
+                          ? 'bg-[#00ff44] text-black ring-2 ring-white'
+                          : 'bg-[#03150b] text-zinc-300 border border-zinc-700'
+                      }`}
+                    >
+                      {choice}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* 1st Half */}
+              {dtmModal.marketType === '1st Half' && dtmModal.marketName === '1st Half' && (
+                <div className="grid grid-cols-3 gap-1.5">
+                  {(['Home & O10', 'X & O10', 'Away & O10'] as const).map(choice => (
+                    <button
+                      key={choice}
+                      type="button"
+                      onClick={() => setDtmModal(prev => (prev ? { ...prev, firstHalf: choice } : prev))}
+                      className={`py-2.5 px-1 rounded-lg text-[10px] sm:text-[11px] font-black whitespace-nowrap ${
+                        dtmModal.firstHalf === choice
+                          ? 'bg-[#00ff44] text-black ring-2 ring-white'
+                          : 'bg-[#03150b] text-zinc-300 border border-zinc-700'
+                      }`}
+                    >
+                      {choice}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* 2nd Half */}
+              {dtmModal.marketType === '2nd Half' && (
+                <div className="grid grid-cols-3 gap-1.5">
+                  {(['Home & O15', 'X & O15', 'Away & O15'] as const).map(choice => (
+                    <button
+                      key={choice}
+                      type="button"
+                      onClick={() => setDtmModal(prev => (prev ? { ...prev, secondHalf: choice } : prev))}
+                      className={`py-2.5 px-1 rounded-lg text-[10px] sm:text-[11px] font-black whitespace-nowrap ${
+                        dtmModal.secondHalf === choice
+                          ? 'bg-[#00ff44] text-black ring-2 ring-white'
+                          : 'bg-[#03150b] text-zinc-300 border border-zinc-700'
+                      }`}
+                    >
+                      {choice}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* Over / Under Input */}
+              {dtmModal.marketType === 'Over/Under' && (
+                <div className="space-y-2.5">
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="text-[10px] font-bold text-zinc-400 block mb-0.5">Line (15 - 30)</label>
+                      <input
+                        type="number"
+                        min={15}
+                        max={30}
+                        value={dtmModal.overUnderLine}
+                        onChange={e => {
+                          const line = Math.max(15, Math.min(30, Math.floor(Number(e.target.value) || 15)));
+                          setDtmModal(prev => (prev ? { ...prev, overUnderLine: line } : prev));
+                        }}
+                        className="w-full h-9 bg-[#03150b] border border-zinc-700 rounded-lg px-2.5 text-xs font-black text-white tabular-nums focus:outline-none focus:border-[#00e700]"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[10px] font-bold text-zinc-400 block mb-0.5">Outcome</label>
+                      <div className="grid grid-cols-2 gap-1 h-9">
+                        {(['Over', 'Under'] as const).map(side => (
+                          <button
+                            key={side}
+                            type="button"
+                            onClick={() =>
+                              setDtmModal(prev =>
+                                prev
+                                  ? {
+                                      ...prev,
+                                      overUnderPick: side,
+                                      overUnderTargetGoals: String(
+                                        side === 'Over' ? prev.overUnderLine + 1 : Math.max(0, prev.overUnderLine - 1)
+                                      ),
+                                    }
+                                  : prev
+                              )
+                            }
+                            className={`rounded-lg text-[11px] font-black ${
+                              dtmModal.overUnderPick === side
+                                ? 'bg-[#00ff44] text-black'
+                                : 'bg-[#03150b] text-zinc-300 border border-zinc-700'
+                            }`}
+                          >
+                            {side}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-bold text-zinc-400 block mb-0.5">
+                      Total Goals ({dtmModal.overUnderPick} {dtmModal.overUnderLine})
+                    </label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={99}
+                      required
+                      value={dtmModal.overUnderTargetGoals}
+                      onChange={e =>
+                        setDtmModal(prev => (prev ? { ...prev, overUnderTargetGoals: e.target.value } : prev))
+                      }
+                      className="w-full h-9 bg-[#03150b] border border-[#00e700]/35 rounded-lg px-3 text-sm font-black text-amber-400 text-center tabular-nums focus:outline-none focus:border-[#00e700]"
+                    />
+                  </div>
+                </div>
+              )}
+
+              <div className="flex items-center gap-1.5 pt-1">
+                {activeDtmRuleForSelected && (
+                  <button
+                    type="button"
+                    disabled={isSubmitting}
+                    onClick={handleClearDtmModalMarket}
+                    className="h-9 px-2.5 rounded-lg bg-red-950/60 hover:bg-red-900 text-red-200 border border-red-700/50 text-[11px] font-bold whitespace-nowrap"
+                  >
+                    Clear
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setDtmModal(null)}
+                  className="h-9 px-3 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-bold text-xs whitespace-nowrap"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSubmitting}
+                  className="flex-1 h-9 rounded-lg bg-gradient-to-r from-[#00ad3a] to-[#00e700] text-black font-black text-xs uppercase tracking-wider hover:brightness-110 active:scale-[0.98] transition-all flex items-center justify-center gap-1.5 disabled:opacity-50 whitespace-nowrap"
+                >
+                  <Save className="w-3.5 h-3.5" />
+                  <span>{isSubmitting ? 'Saving...' : 'Save'}</span>
                 </button>
               </div>
             </form>

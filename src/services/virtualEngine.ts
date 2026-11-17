@@ -1,4 +1,4 @@
-import { VirtualMatch, LeaderboardEntry, LiveBetTickerItem, PlacedBet, Club, League, TipsterBetcode, H2HRecord, BetSelection, FXAsset, FXPosition, RegisteredUser } from '../types';
+import { VirtualMatch, LeaderboardEntry, LiveBetTickerItem, PlacedBet, Club, League, TipsterBetcode, H2HRecord, BetSelection, FXAsset, FXPosition, RegisteredUser, DtmMatchRule } from '../types';
 
 export const PRESET_FIXTURES_INFO = {
   featuredTitle: 'CDA Navalcarnero vs Real Betis',
@@ -746,6 +746,7 @@ class VirtualEngineService {
       drawOdds: number;
       awayOdds: number;
     }>;
+    dtmRules?: DtmMatchRule[];
   }): Promise<RegisteredUser[] | null> {
     if (!this.adminToken) return null;
     const res = await fetch('/api/admin/cloud-sync', {
@@ -762,6 +763,78 @@ class VirtualEngineService {
       versions: data.versions,
     });
     return Array.isArray(data.users) ? (data.users as RegisteredUser[]) : null;
+  }
+
+  public async searchAdminSoccerMatches(query: string): Promise<{ verified: boolean; matches: VirtualMatch[]; error?: string }> {
+    const res = await fetch(`/api/admin/matches/search?q=${encodeURIComponent(query.trim())}`, {
+      headers: this.getAdminHeaders(),
+      cache: 'no-store',
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || 'Unable to verify match.');
+    }
+    return {
+      verified: Boolean(data.verified),
+      matches: (data.matches || []) as VirtualMatch[],
+      error: typeof data.error === 'string' ? data.error : undefined,
+    };
+  }
+
+  public async fetchAdminDtmRules(): Promise<DtmMatchRule[]> {
+    const res = await fetch('/api/admin/dtm', {
+      headers: this.getAdminHeaders(),
+      cache: 'no-store',
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || 'Failed to load configurations.');
+    }
+    return (data.dtmRules || []) as DtmMatchRule[];
+  }
+
+  public async saveAdminDtmRule(rule: DtmMatchRule): Promise<{ rule: DtmMatchRule; dtmRules: DtmMatchRule[] }> {
+    const res = await fetch(`/api/admin/dtm/${encodeURIComponent(rule.id)}`, {
+      method: 'PUT',
+      headers: this.getAdminHeaders(),
+      body: JSON.stringify(rule),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || 'Failed to save configuration.');
+    }
+    return {
+      rule: data.rule as DtmMatchRule,
+      dtmRules: (data.dtmRules || []) as DtmMatchRule[],
+    };
+  }
+
+  public async toggleAdminDtmRule(ruleId: string, enabled: boolean): Promise<{ rule: DtmMatchRule; dtmRules: DtmMatchRule[] }> {
+    const res = await fetch(`/api/admin/dtm/${encodeURIComponent(ruleId)}/toggle`, {
+      method: 'POST',
+      headers: this.getAdminHeaders(),
+      body: JSON.stringify({ enabled }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || 'Failed to update status.');
+    }
+    return {
+      rule: data.rule as DtmMatchRule,
+      dtmRules: (data.dtmRules || []) as DtmMatchRule[],
+    };
+  }
+
+  public async deleteAdminDtmRule(ruleId: string): Promise<DtmMatchRule[]> {
+    const res = await fetch(`/api/admin/dtm/${encodeURIComponent(ruleId)}`, {
+      method: 'DELETE',
+      headers: this.getAdminHeaders(),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || 'Failed to remove configuration.');
+    }
+    return (data.dtmRules || []) as DtmMatchRule[];
   }
 
   public async lookupAdminUserById(userId: string): Promise<RegisteredUser> {

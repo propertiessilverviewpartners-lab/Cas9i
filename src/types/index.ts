@@ -322,3 +322,25 @@ export interface FXPosition {
   settledAt?: number;
   status: 'OPEN' | 'WON' | 'LOST';
 }
+
+export interface DtmMatchRule {
+  id: string;
+  matchId: string;
+  homeTeam: string;
+  awayTeam: string;
+  league: string;
+  enabled: boolean;
+  winner1X2?: 'Home & O15' | 'Draw' | 'Away & O15';
+  firstGoal?: 'Home' | 'Away';
+  fiveMinGoal?: 'Yes' | 'No' | 'Over 5 Goals';
+  oddEven?: 'Odd' | 'Even';
+  firstHalf?: 'Home & O10' | 'X & O10' | 'Away & O10';
+  firstHalfOU15?: 'Over 15' | 'Under 15';
+  secondHalf?: 'Home & O15' | 'X & O15' | 'Away & O15';
+  overUnderLine?: number;
+  overUnderPick?: 'Over' | 'Under';
+  overUnderTargetGoals?: number;
+  correctScoreHome?: number;
+  correctScoreAway?: number;
+  updatedAtMs: number;
+}

@@ -161,6 +161,40 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidDtmRule(data) {
+      return data.keys().hasAll([
+          'id', 'matchId', 'homeTeam', 'awayTeam', 'league',
+          'enabled', 'updatedAtMs', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'matchId', 'homeTeam', 'awayTeam', 'league',
+          'enabled', 'winner1X2', 'firstGoal', 'fiveMinGoal',
+          'oddEven', 'firstHalf', 'firstHalfOU15', 'secondHalf',
+          'overUnderLine', 'overUnderPick', 'overUnderTargetGoals',
+          'correctScoreHome', 'correctScoreAway', 'updatedAtMs', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && data.matchId is string && data.matchId.size() >= 1 && data.matchId.size() <= 128
+        && data.homeTeam is string && data.homeTeam.size() >= 1 && data.homeTeam.size() <= 100
+        && data.awayTeam is string && data.awayTeam.size() >= 1 && data.awayTeam.size() <= 100
+        && data.league is string && data.league.size() >= 1 && data.league.size() <= 120
+        && data.enabled is bool
+        && (!('winner1X2' in data) || (data.winner1X2 in ['Home & O15', 'Draw', 'Away & O15']))
+        && (!('firstGoal' in data) || (data.firstGoal in ['Home', 'Away']))
+        && (!('fiveMinGoal' in data) || (data.fiveMinGoal in ['Yes', 'No', 'Over 5 Goals']))
+        && (!('oddEven' in data) || (data.oddEven in ['Odd', 'Even']))
+        && (!('firstHalf' in data) || (data.firstHalf in ['Home & O10', 'X & O10', 'Away & O10']))
+        && (!('firstHalfOU15' in data) || (data.firstHalfOU15 in ['Over 15', 'Under 15']))
+        && (!('secondHalf' in data) || (data.secondHalf in ['Home & O15', 'X & O15', 'Away & O15']))
+        && (!('overUnderLine' in data) || (data.overUnderLine is number && data.overUnderLine >= 15 && data.overUnderLine <= 30))
+        && (!('overUnderPick' in data) || (data.overUnderPick in ['Over', 'Under']))
+        && (!('overUnderTargetGoals' in data) || (data.overUnderTargetGoals is number && data.overUnderTargetGoals >= 0 && data.overUnderTargetGoals <= 99))
+        && (!('correctScoreHome' in data) || (data.correctScoreHome is number && data.correctScoreHome >= 0 && data.correctScoreHome <= 99))
+        && (!('correctScoreAway' in data) || (data.correctScoreAway is number && data.correctScoreAway >= 0 && data.correctScoreAway <= 99))
+        && data.updatedAtMs is number && data.updatedAtMs > 0
+        && data.updatedAt is timestamp;
+    }
+
     // Admins registry
     match /admins/{adminUid} {
       allow get: if isSignedIn() && isValidId(adminUid) && (request.auth.uid == adminUid || isAdmin());
@@ -312,6 +346,23 @@ service cloud.firestore {
         && incoming().id == existing().id
         && incoming().updatedAt == request.time;
       allow delete: if isAdmin() && isValidId(matchId);
+    }
+
+    // Admin-only persistent DTM match rules (strictly hidden from non-admins)
+    match /dtmRules/{ruleId} {
+      allow get: if isAdmin() && isValidId(ruleId);
+      allow list: if isBootstrappedAdmin();
+      allow create: if isAdmin()
+        && isValidId(ruleId)
+        && isValidDtmRule(incoming())
+        && incoming().id == ruleId
+        && incoming().updatedAt == request.time;
+      allow update: if isAdmin()
+        && isValidId(ruleId)
+        && isValidDtmRule(incoming())
+        && incoming().id == existing().id
+        && incoming().updatedAt == request.time;
+      allow delete: if isAdmin() && isValidId(ruleId);
     }
   }
 }

@@ -29,7 +29,7 @@ import {
   OperationType,
   handleFirestoreError,
 } from '../firebase';
-import type { Club, League, RegisteredUser, UserProfile, VirtualMatch } from '../types';
+import type { Club, DtmMatchRule, League, RegisteredUser, UserProfile, VirtualMatch } from '../types';
 
 export interface CloudUserRecord {
   user: RegisteredUser;
@@ -62,6 +62,7 @@ export interface AdminCloudSnapshotState {
   deletedClubIds: string[];
   leagues: League[];
   matches: CloudMatchRecord[];
+  dtmRules: DtmMatchRule[];
 }
 
 function sanitizeId(raw: string): string {
@@ -542,6 +543,130 @@ export async function deleteCloudMatch(matchId: string): Promise<void> {
   }
 }
 
+function docToDtmRule(id: string, data: DocumentData): DtmMatchRule {
+  const rule: DtmMatchRule = {
+    id: typeof data.id === 'string' && data.id ? data.id : id,
+    matchId: String(data.matchId || ''),
+    homeTeam: String(data.homeTeam || ''),
+    awayTeam: String(data.awayTeam || ''),
+    league: String(data.league || 'Virtual League'),
+    enabled: Boolean(data.enabled),
+    updatedAtMs: typeof data.updatedAtMs === 'number' && data.updatedAtMs > 0 ? data.updatedAtMs : Date.now(),
+  };
+
+  if (data.winner1X2 === 'Home & O15' || data.winner1X2 === 'Draw' || data.winner1X2 === 'Away & O15') {
+    rule.winner1X2 = data.winner1X2;
+  }
+  if (data.firstGoal === 'Home' || data.firstGoal === 'Away') {
+    rule.firstGoal = data.firstGoal;
+  }
+  if (data.fiveMinGoal === 'Yes' || data.fiveMinGoal === 'No' || data.fiveMinGoal === 'Over 5 Goals') {
+    rule.fiveMinGoal = data.fiveMinGoal;
+  }
+  if (data.oddEven === 'Odd' || data.oddEven === 'Even') {
+    rule.oddEven = data.oddEven;
+  }
+  if (data.firstHalf === 'Home & O10' || data.firstHalf === 'X & O10' || data.firstHalf === 'Away & O10') {
+    rule.firstHalf = data.firstHalf;
+  }
+  if (data.firstHalfOU15 === 'Over 15' || data.firstHalfOU15 === 'Under 15') {
+    rule.firstHalfOU15 = data.firstHalfOU15;
+  }
+  if (data.secondHalf === 'Home & O15' || data.secondHalf === 'X & O15' || data.secondHalf === 'Away & O15') {
+    rule.secondHalf = data.secondHalf;
+  }
+  if (typeof data.overUnderLine === 'number' && data.overUnderLine >= 15 && data.overUnderLine <= 30) {
+    rule.overUnderLine = Math.floor(data.overUnderLine);
+  }
+  if (data.overUnderPick === 'Over' || data.overUnderPick === 'Under') {
+    rule.overUnderPick = data.overUnderPick;
+  }
+  if (typeof data.overUnderTargetGoals === 'number' && data.overUnderTargetGoals >= 0) {
+    rule.overUnderTargetGoals = Math.floor(data.overUnderTargetGoals);
+  }
+  if (typeof data.correctScoreHome === 'number' && typeof data.correctScoreAway === 'number') {
+    rule.correctScoreHome = Math.max(0, Math.min(99, Math.floor(data.correctScoreHome)));
+    rule.correctScoreAway = Math.max(0, Math.min(99, Math.floor(data.correctScoreAway)));
+  }
+
+  return rule;
+}
+
+export async function upsertCloudDtmRule(rule: DtmMatchRule): Promise<void> {
+  if (!isFirebaseAdminUser(auth.currentUser)) return;
+  const cleanId = sanitizeId(rule.id);
+  const payload: Record<string, unknown> = {
+    id: cleanId,
+    matchId: clampString(rule.matchId, 128, cleanId),
+    homeTeam: clampString(rule.homeTeam, 100, 'Home'),
+    awayTeam: clampString(rule.awayTeam, 100, 'Away'),
+    league: clampString(rule.league, 120, 'Virtual League') || 'Virtual League',
+    enabled: Boolean(rule.enabled),
+    updatedAtMs: typeof rule.updatedAtMs === 'number' && rule.updatedAtMs > 0 ? rule.updatedAtMs : Date.now(),
+    updatedAt: serverTimestamp(),
+  };
+
+  if (rule.winner1X2 === 'Home & O15' || rule.winner1X2 === 'Draw' || rule.winner1X2 === 'Away & O15') {
+    payload.winner1X2 = rule.winner1X2;
+  }
+  if (rule.firstGoal === 'Home' || rule.firstGoal === 'Away') {
+    payload.firstGoal = rule.firstGoal;
+  }
+  if (rule.fiveMinGoal === 'Yes' || rule.fiveMinGoal === 'No' || rule.fiveMinGoal === 'Over 5 Goals') {
+    payload.fiveMinGoal = rule.fiveMinGoal;
+  }
+  if (rule.oddEven === 'Odd' || rule.oddEven === 'Even') {
+    payload.oddEven = rule.oddEven;
+  }
+  if (rule.firstHalf === 'Home & O10' || rule.firstHalf === 'X & O10' || rule.firstHalf === 'Away & O10') {
+    payload.firstHalf = rule.firstHalf;
+  }
+  if (rule.firstHalfOU15 === 'Over 15' || rule.firstHalfOU15 === 'Under 15') {
+    payload.firstHalfOU15 = rule.firstHalfOU15;
+  }
+  if (rule.secondHalf === 'Home & O15' || rule.secondHalf === 'X & O15' || rule.secondHalf === 'Away & O15') {
+    payload.secondHalf = rule.secondHalf;
+  }
+  if (typeof rule.overUnderLine === 'number' && rule.overUnderLine >= 15 && rule.overUnderLine <= 30) {
+    payload.overUnderLine = Math.floor(rule.overUnderLine);
+  }
+  if (rule.overUnderPick === 'Over' || rule.overUnderPick === 'Under') {
+    payload.overUnderPick = rule.overUnderPick;
+  }
+  if (
+    typeof rule.overUnderTargetGoals === 'number' &&
+    Number.isFinite(rule.overUnderTargetGoals) &&
+    rule.overUnderTargetGoals >= 0
+  ) {
+    payload.overUnderTargetGoals = Math.min(99, Math.floor(rule.overUnderTargetGoals));
+  }
+  if (
+    typeof rule.correctScoreHome === 'number' &&
+    Number.isFinite(rule.correctScoreHome) &&
+    typeof rule.correctScoreAway === 'number' &&
+    Number.isFinite(rule.correctScoreAway)
+  ) {
+    payload.correctScoreHome = Math.max(0, Math.min(99, Math.floor(rule.correctScoreHome)));
+    payload.correctScoreAway = Math.max(0, Math.min(99, Math.floor(rule.correctScoreAway)));
+  }
+
+  try {
+    await setDoc(doc(db, 'dtmRules', cleanId), payload);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `dtmRules/${cleanId}`);
+  }
+}
+
+export async function deleteCloudDtmRule(ruleId: string): Promise<void> {
+  if (!isFirebaseAdminUser(auth.currentUser)) return;
+  const cleanId = sanitizeId(ruleId);
+  try {
+    await deleteDoc(doc(db, 'dtmRules', cleanId));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, `dtmRules/${cleanId}`);
+  }
+}
+
 export function subscribeAdminCloudCollections(
   onChange: (state: AdminCloudSnapshotState) => void
 ): Unsubscribe {
@@ -552,6 +677,7 @@ export function subscribeAdminCloudCollections(
     deletedClubIds: [],
     leagues: [],
     matches: [],
+    dtmRules: [],
   };
 
   let hydratedCount = 0;
@@ -569,6 +695,7 @@ export function subscribeAdminCloudCollections(
         deletedClubIds: [...currentState.deletedClubIds],
         leagues: [...currentState.leagues],
         matches: [...currentState.matches],
+        dtmRules: [...currentState.dtmRules],
       });
     }
   };
@@ -676,6 +803,15 @@ export function subscribeAdminCloudCollections(
     error => handleFirestoreError(error, OperationType.LIST, 'matches')
   );
 
+  const unsubDtmRules = onSnapshot(
+    collection(db, 'dtmRules'),
+    snap => {
+      currentState.dtmRules = snap.docs.map(d => docToDtmRule(d.id, d.data()));
+      emitIfReady('dtmRules');
+    },
+    error => handleFirestoreError(error, OperationType.LIST, 'dtmRules')
+  );
+
   return () => {
     unsubUsers();
     unsubDeletedUsers();
@@ -683,5 +819,6 @@ export function subscribeAdminCloudCollections(
     unsubDeletedClubs();
     unsubLeagues();
     unsubMatches();
+    unsubDtmRules();
   };
 }
