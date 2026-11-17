@@ -1,15 +1,22 @@
 import React, { useState, useEffect } from 'react';
-import { UserProfile } from '../types';
-import { X, DollarSign, RotateCcw, Check, Lock, Mail, User, ShieldCheck, KeyRound } from 'lucide-react';
+import { FXPosition, PlacedBet, UserProfile } from '../types';
+import { X, Lock, Mail, User, ShieldCheck, KeyRound } from 'lucide-react';
 import { soundManager } from '../services/soundEffects';
 import { virtualEngine } from '../services/virtualEngine';
+import {
+  signInWithGooglePopup,
+  signOutFirebase,
+  isFirebaseAdminUser,
+  ensureBootstrappedAdminRecord,
+  findOrCreateGoogleUser,
+} from '../services/firebaseSync';
 
 interface AuthModalProps {
   isOpen: boolean;
   onClose: () => void;
   user: UserProfile;
-  initialMode: 'login' | 'register' | 'deposit';
-  onUpdateUser: (updatedUser: Partial<UserProfile>) => void;
+  initialMode: 'login' | 'register';
+  onUpdateUser: (updatedUser: Partial<UserProfile>, hydratedBets?: { placedBets: PlacedBet[]; fxPositions: FXPosition[] }) => void;
   onAdminLoginSuccess?: () => void;
 }
 
@@ -23,14 +30,13 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   onUpdateUser,
   onAdminLoginSuccess
 }) => {
-  const [mode, setMode] = useState<'login' | 'register' | 'deposit'>(initialMode);
+  const [mode, setMode] = useState<'login' | 'register'>(initialMode);
   const [emailInput, setEmailInput] = useState('');
   const [passwordInput, setPasswordInput] = useState('');
   const [usernameInput, setUsernameInput] = useState('');
   const [fullNameInput, setFullNameInput] = useState('');
   const [selectedAvatar, setSelectedAvatar] = useState('🦁');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [depositSuccess, setDepositSuccess] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Registration verification step state
@@ -84,6 +90,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           username: 'Admin',
           fullName: 'CAS9i Admin',
           avatar: '🛡️',
+          balance: result.adminBalance ?? 100000,
           isLoggedIn: true,
           isAdmin: true,
           verified: true
@@ -95,19 +102,33 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
       if (result.user) {
         soundManager.playBetPlaced();
-        onUpdateUser({
-          id: result.user.id,
-          email: result.user.email,
-          username: result.user.username,
-          fullName: result.user.fullName,
-          avatar: result.user.avatar || selectedAvatar,
-          balance: result.user.balance,
-          phone: result.user.phone,
-          country: result.user.country,
-          verified: result.user.verified,
-          isLoggedIn: true,
-          isAdmin: false
-        });
+        onUpdateUser(
+          {
+            id: result.user.id,
+            email: result.user.email,
+            username: result.user.username,
+            fullName: result.user.fullName,
+            avatar: result.user.avatar || selectedAvatar,
+            balance: result.user.balance,
+            phone: result.user.phone,
+            country: result.user.country,
+            city: result.user.city,
+            address: result.user.address,
+            dateOfBirth: result.user.dateOfBirth,
+            kycIdNumber: result.user.kycIdNumber,
+            accountTier: result.user.accountTier,
+            createdAt: result.user.createdAt,
+            totalBetsPlaced: result.user.totalBetsPlaced ?? 0,
+            totalWon: result.user.totalWon ?? 0,
+            verified: result.user.verified,
+            isLoggedIn: true,
+            isAdmin: false
+          },
+          {
+            placedBets: result.placedBets || [],
+            fxPositions: result.fxPositions || [],
+          }
+        );
         onClose();
         return;
       }
@@ -186,17 +207,26 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       }
 
       soundManager.playBetPlaced();
-      onUpdateUser({
-        id: res.user.id,
-        email: res.user.email,
-        username: res.user.username,
-        fullName: res.user.fullName,
-        avatar: res.user.avatar,
-        balance: res.user.balance,
-        verified: res.user.verified,
-        isLoggedIn: true,
-        isAdmin: false
-      });
+      onUpdateUser(
+        {
+          id: res.user.id,
+          email: res.user.email,
+          username: res.user.username,
+          fullName: res.user.fullName,
+          avatar: res.user.avatar,
+          balance: 0,
+          verified: res.user.verified,
+          createdAt: res.user.createdAt,
+          totalBetsPlaced: 0,
+          totalWon: 0,
+          isLoggedIn: true,
+          isAdmin: false
+        },
+        {
+          placedBets: res.placedBets || [],
+          fxPositions: res.fxPositions || [],
+        }
+      );
 
       setRegisterStep('form');
       setPasswordInput('');
@@ -209,32 +239,90 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     }
   };
 
-  const handleDeposit = (amount: number) => {
-    soundManager.playBetPlaced();
-    const nextBalance = user.balance + amount;
-    if (user.isLoggedIn && !user.isAdmin && user.id && user.id !== 'guest') {
-      virtualEngine.syncUserBalanceDelta(user.id, amount);
-    }
-    onUpdateUser({
-      balance: nextBalance
-    });
-    setDepositSuccess(true);
-    setTimeout(() => {
-      setDepositSuccess(false);
-      onClose();
-    }, 900);
-  };
-
-  const handleReset = () => {
+  const handleGoogleSignIn = async () => {
+    if (isSubmitting) return;
+    setErrorMsg(null);
+    setIsSubmitting(true);
     soundManager.playClick();
-    const delta = 100000 - user.balance;
-    if (user.isLoggedIn && !user.isAdmin && user.id && user.id !== 'guest' && delta !== 0) {
-      virtualEngine.syncUserBalanceDelta(user.id, delta);
+
+    try {
+      const fbUser = await signInWithGooglePopup();
+
+      if (isFirebaseAdminUser(fbUser)) {
+        await ensureBootstrappedAdminRecord(fbUser);
+        const idToken = await fbUser.getIdToken();
+        const adminRes = await virtualEngine.loginWithGoogleAdmin(idToken);
+        if (!adminRes.ok) {
+          setErrorMsg(adminRes.error || 'Admin authorization failed.');
+          return;
+        }
+        soundManager.playBetPlaced();
+        onUpdateUser({
+          id: 'admin-cas9i',
+          email: adminRes.email || fbUser.email || ADMIN_EMAIL,
+          username: 'Admin',
+          fullName: 'CAS9i Admin',
+          avatar: '🛡️',
+          balance: adminRes.adminBalance ?? 100000,
+          isLoggedIn: true,
+          isAdmin: true,
+          verified: true,
+        });
+        onClose();
+        if (onAdminLoginSuccess) onAdminLoginSuccess();
+        return;
+      }
+
+      const cloudRes = await findOrCreateGoogleUser(fbUser, selectedAvatar);
+      if (cloudRes.deleted || !cloudRes.user) {
+        await signOutFirebase().catch(() => {});
+        setErrorMsg('This account has been permanently deleted by Admin.');
+        return;
+      }
+
+      const idToken = await fbUser.getIdToken();
+      const serverSync = await virtualEngine.syncGoogleUserSession(idToken, cloudRes.user);
+      const finalUser = serverSync.user || cloudRes.user;
+
+      soundManager.playBetPlaced();
+      onUpdateUser(
+        {
+          id: finalUser.id,
+          email: finalUser.email,
+          username: finalUser.username,
+          fullName: finalUser.fullName,
+          avatar: finalUser.avatar || selectedAvatar,
+          balance: finalUser.balance,
+          phone: finalUser.phone,
+          country: finalUser.country,
+          city: finalUser.city,
+          address: finalUser.address,
+          dateOfBirth: finalUser.dateOfBirth,
+          kycIdNumber: finalUser.kycIdNumber,
+          accountTier: finalUser.accountTier,
+          createdAt: finalUser.createdAt,
+          totalBetsPlaced: finalUser.totalBetsPlaced ?? 0,
+          totalWon: finalUser.totalWon ?? 0,
+          verified: true,
+          isLoggedIn: true,
+          isAdmin: false,
+        },
+        {
+          placedBets: serverSync.placedBets || [],
+          fxPositions: serverSync.fxPositions || [],
+        }
+      );
+      onClose();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Google sign-in failed.';
+      if (msg.includes('popup-closed-by-user') || msg.includes('cancelled-popup-request')) {
+        setErrorMsg('Google sign-in popup was closed. Please try again.');
+      } else {
+        setErrorMsg('Unable to complete Google sign-in. Please try again.');
+      }
+    } finally {
+      setIsSubmitting(false);
     }
-    onUpdateUser({
-      balance: 100000
-    });
-    onClose();
   };
 
   return (
@@ -244,13 +332,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         <div className="flex items-center justify-between px-4 py-3 bg-[#03150b] border-b border-[#00e700]/20">
           <div className="flex items-center gap-2">
             <span className="text-xl">
-              {mode === 'deposit' ? '💰' : mode === 'register' ? '⭐' : '🔐'}
+              {mode === 'register' ? '⭐' : '🔐'}
             </span>
             <div>
               <h3 className="text-sm sm:text-base font-black text-white tracking-wide">
-                {mode === 'deposit'
-                  ? 'QUICK TOP-UP / DEPOSIT'
-                  : mode === 'register'
+                {mode === 'register'
                   ? registerStep === 'verify'
                     ? 'VERIFY YOUR ACCOUNT'
                     : 'CREATE CAS9i ACCOUNT'
@@ -298,20 +384,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           >
             Register
           </button>
-          {user.isLoggedIn && (
-            <button
-              onClick={() => {
-                soundManager.playClick();
-                setErrorMsg(null);
-                setMode('deposit');
-              }}
-              className={`flex-1 py-1.5 rounded-lg text-xs font-black transition-all whitespace-nowrap ${
-                mode === 'deposit' ? 'bg-[#00ad3a] text-white shadow-sm' : 'text-zinc-400 hover:text-white'
-              }`}
-            >
-              Top-Up ($)
-            </button>
-          )}
         </div>
 
         {/* Content */}
@@ -322,52 +394,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             </div>
           )}
 
-          {mode === 'deposit' ? (
-            <div className="space-y-4">
-              <div className="text-center">
-                <span className="text-xs text-zinc-400 block">Current Balance</span>
-                <span className="text-3xl font-black text-[#00e700] tabular-nums">
-                  ${user.balance.toFixed(2)}
-                </span>
-                {!user.isAdmin && user.id !== 'guest' && (
-                  <span className="text-xs font-mono font-bold text-zinc-300 mt-1 block tabular-nums">
-                    Your Deposit ID: <span className="text-[#00e700]">#{user.id}</span>
-                  </span>
-                )}
-              </div>
-
-              {depositSuccess ? (
-                <div className="bg-[#00ad3a] text-black font-black p-3 rounded-xl text-center flex items-center justify-center gap-2">
-                  <Check className="w-5 h-5" />
-                  <span>FUNDS ADDED SUCCESSFULLY!</span>
-                </div>
-              ) : (
-                <div className="space-y-2">
-                  <span className="text-xs text-zinc-400 font-bold block">Select Demo Top-Up Amount:</span>
-                  <div className="grid grid-cols-3 gap-2">
-                    {[30000, 50000, 100000, 250000, 500000, 1000000].map(amt => (
-                      <button
-                        key={amt}
-                        onClick={() => handleDeposit(amt)}
-                        className="py-2.5 rounded-xl bg-[#062416] hover:bg-[#00ad3a] border border-[#00e700]/30 hover:border-[#00e700] text-white hover:text-black font-black text-xs sm:text-sm transition-all shadow-sm active:scale-95 flex items-center justify-center gap-0.5 tabular-nums"
-                      >
-                        <DollarSign className="w-3.5 h-3.5" />
-                        <span>+{amt >= 1000000 ? '1M' : `${amt / 1000}k`}</span>
-                      </button>
-                    ))}
-                  </div>
-
-                  <button
-                    onClick={handleReset}
-                    className="w-full mt-3 py-2 rounded-lg bg-zinc-800 text-zinc-300 hover:text-white text-xs font-bold flex items-center justify-center gap-1.5"
-                  >
-                    <RotateCcw className="w-3.5 h-3.5" />
-                    <span>Reset to Default $100,000.00</span>
-                  </button>
-                </div>
-              )}
-            </div>
-          ) : mode === 'login' ? (
+          {mode === 'login' ? (
             <form onSubmit={handleLoginSubmit} className="space-y-3">
               <div>
                 <label className="text-xs text-zinc-400 font-bold block mb-1">Email Address</label>
@@ -405,6 +432,22 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 className="w-full h-11 rounded-xl bg-gradient-to-r from-[#00ad3a] to-[#00e700] text-black font-black text-sm uppercase tracking-wider shadow-[0_0_20px_rgba(0,231,0,0.4)] hover:brightness-110 active:scale-95 transition-all mt-2 disabled:opacity-50"
               >
                 {isSubmitting ? 'Signing In...' : 'Login'}
+              </button>
+
+              <div className="relative flex items-center py-1">
+                <div className="flex-grow border-t border-zinc-800" />
+                <span className="px-2 text-[10px] font-bold uppercase text-zinc-500">or</span>
+                <div className="flex-grow border-t border-zinc-800" />
+              </div>
+
+              <button
+                type="button"
+                disabled={isSubmitting}
+                onClick={handleGoogleSignIn}
+                className="w-full h-10 rounded-xl bg-[#062416] hover:bg-[#0b3521] border border-[#00e700]/35 text-white font-black text-xs flex items-center justify-center gap-2 transition-all active:scale-95 disabled:opacity-50"
+              >
+                <span className="text-sm font-black text-[#00e700]">G</span>
+                <span>Continue with Google</span>
               </button>
             </form>
           ) : registerStep === 'verify' ? (
@@ -557,6 +600,22 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 className="w-full h-11 rounded-xl bg-gradient-to-r from-[#00ad3a] to-[#00e700] text-black font-black text-sm uppercase tracking-wider shadow-[0_0_20px_rgba(0,231,0,0.4)] hover:brightness-110 active:scale-95 transition-all mt-1 disabled:opacity-50"
               >
                 {isSubmitting ? 'Creating Account...' : 'Continue to Verification'}
+              </button>
+
+              <div className="relative flex items-center py-0.5">
+                <div className="flex-grow border-t border-zinc-800" />
+                <span className="px-2 text-[10px] font-bold uppercase text-zinc-500">or</span>
+                <div className="flex-grow border-t border-zinc-800" />
+              </div>
+
+              <button
+                type="button"
+                disabled={isSubmitting}
+                onClick={handleGoogleSignIn}
+                className="w-full h-10 rounded-xl bg-[#062416] hover:bg-[#0b3521] border border-[#00e700]/35 text-white font-black text-xs flex items-center justify-center gap-2 transition-all active:scale-95 disabled:opacity-50"
+              >
+                <span className="text-sm font-black text-[#00e700]">G</span>
+                <span>Register with Google</span>
               </button>
             </form>
           )}

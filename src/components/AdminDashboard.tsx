@@ -17,7 +17,6 @@ import {
   ArrowLeft,
   ChevronRight,
   Search,
-  List,
   Trophy,
   X,
   AlertTriangle,
@@ -25,18 +24,42 @@ import {
   UserCheck,
   Edit3,
   Clock,
-  Save
+  Save,
+  User,
+  LogOut,
+  Cloud,
+  RefreshCw
 } from 'lucide-react';
+import {
+  subscribeFirebaseAuth,
+  isFirebaseAdminUser,
+  ensureBootstrappedAdminRecord,
+  signInWithGooglePopup,
+  signOutFirebase,
+  subscribeAdminCloudCollections,
+  upsertCloudUser,
+  deleteCloudUserWithTombstone,
+  syncMetaCounterToAtLeast,
+  upsertCloudClub,
+  deleteCloudClubWithTombstone,
+  upsertCloudLeague,
+  upsertCloudMatch,
+  deleteCloudMatch,
+  type AdminCloudSnapshotState,
+} from '../services/firebaseSync';
 
 interface AdminDashboardProps {
   matches: VirtualMatch[];
   clubs: Club[];
   leagues: League[];
-  onNavigateSports: () => void;
+  adminBalance: number;
+  adminEmail: string;
+  onLogout: () => void;
 }
 
 type AdminPage =
   | 'hub'
+  | 'profile'
   | 'fix_match'
   | 'create_club'
   | 'club_directory'
@@ -53,6 +76,7 @@ const AVATAR_OPTIONS = ['🦁', '👑', '⚡', '💎', '⚽', '🎯', '🚀', '�
 
 const VALID_ADMIN_PAGES: AdminPage[] = [
   'hub',
+  'profile',
   'fix_match',
   'create_club',
   'club_directory',
@@ -75,7 +99,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   matches,
   clubs,
   leagues,
-  onNavigateSports
+  adminBalance,
+  adminEmail,
+  onLogout
 }) => {
   const [activePage, setActivePage] = useState<AdminPage>(() => loadSavedAdminPage());
   const [toastMsg, setToastMsg] = useState<string | null>(null);
@@ -93,6 +119,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [topSearchId, setTopSearchId] = useState('');
   const [topSearchError, setTopSearchError] = useState<string | null>(null);
   const [isSearchingUser, setIsSearchingUser] = useState(false);
+
+  // Firebase Cloud Sync State (multi-device Web <-> Mobile persistence)
+  const [isCloudConnected, setIsCloudConnected] = useState(false);
+  const [cloudAdminEmail, setCloudAdminEmail] = useState<string | null>(null);
+  const [isConnectingCloud, setIsConnectingCloud] = useState(false);
+  const [cloudSyncError, setCloudSyncError] = useState<string | null>(null);
+  const latestUsersRef = useRef<RegisteredUser[]>([]);
+  const cloudSyncRef = useRef<AdminCloudSnapshotState | null>(null);
 
   // Deposit Page State
   const [depositSearchId, setDepositSearchId] = useState('');
@@ -204,19 +238,30 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   }, [homeClubId, awayClubId]);
 
   // Fetch registered & verified users on mount and live updates
-  const loadUsersList = async () => {
+  const loadUsersList = async (): Promise<RegisteredUser[]> => {
     try {
       const list = await virtualEngine.fetchAdminUsers();
+      latestUsersRef.current = list;
       setUsers(list);
+      return list;
     } catch {
-      // ignore if token not ready yet
+      return [];
     }
   };
 
   useEffect(() => {
     void loadUsersList();
     const unsub = virtualEngine.onUsersChanged(() => {
-      void loadUsersList();
+      void loadUsersList().then(list => {
+        if (!isCloudConnected || !cloudSyncRef.current) return;
+        const deletedSet = new Set(cloudSyncRef.current.deletedUserIds);
+        const cloudIds = new Set(cloudSyncRef.current.users.map(cu => cu.user.id));
+        for (const u of list) {
+          if (!deletedSet.has(u.id) && !cloudIds.has(u.id)) {
+            void upsertCloudUser(u);
+          }
+        }
+      });
     });
     return () => {
       unsub();
@@ -224,7 +269,97 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         clearInterval(depositTimerRef.current);
       }
     };
+  }, [isCloudConnected]);
+
+  // Subscribe to Firebase Admin Auth & live Firestore collections
+  useEffect(() => {
+    let unsubCloud: (() => void) | null = null;
+    const unsubAuth = subscribeFirebaseAuth(fbUser => {
+      if (unsubCloud) {
+        unsubCloud();
+        unsubCloud = null;
+      }
+
+      if (isFirebaseAdminUser(fbUser) && fbUser) {
+        setIsCloudConnected(true);
+        setCloudAdminEmail(fbUser.email || 'info.mipodi@gmail.com');
+        setCloudSyncError(null);
+        void ensureBootstrappedAdminRecord(fbUser);
+
+        unsubCloud = subscribeAdminCloudCollections(cloudState => {
+          cloudSyncRef.current = cloudState;
+          const deletedUsersSet = new Set(cloudState.deletedUserIds);
+          const cloudUserIds = new Set(cloudState.users.map(cu => cu.user.id));
+
+          void (async () => {
+            const localBefore = await loadUsersList();
+            const syncedUsers = await virtualEngine.pushCloudSyncToServer({
+              users: cloudState.users.map(cu => cu.user),
+              deletedUserIds: cloudState.deletedUserIds,
+              clubs: cloudState.clubs,
+              deletedClubIds: cloudState.deletedClubIds,
+              leagues: cloudState.leagues,
+              matches: cloudState.matches,
+            });
+            if (syncedUsers) {
+              latestUsersRef.current = syncedUsers;
+              setUsers(syncedUsers);
+            }
+
+            // Push any locally-registered un-tombstoned users up to Firestore permanently
+            let maxNumericId = 100000;
+            for (const u of localBefore) {
+              const n = Number(u.id);
+              if (!Number.isNaN(n)) maxNumericId = Math.max(maxNumericId, n);
+              if (!deletedUsersSet.has(u.id) && !cloudUserIds.has(u.id)) {
+                void upsertCloudUser(u);
+              }
+            }
+            for (const cu of cloudState.users) {
+              const n = Number(cu.user.id);
+              if (!Number.isNaN(n)) maxNumericId = Math.max(maxNumericId, n);
+            }
+            if (maxNumericId >= 100001) {
+              void syncMetaCounterToAtLeast(maxNumericId + 1);
+            }
+          })();
+        });
+      } else {
+        cloudSyncRef.current = null;
+        setIsCloudConnected(false);
+        setCloudAdminEmail(null);
+      }
+    });
+
+    return () => {
+      unsubAuth();
+      if (unsubCloud) unsubCloud();
+    };
   }, []);
+
+  const handleConnectCloudSync = async () => {
+    if (isConnectingCloud) return;
+    setCloudSyncError(null);
+    setIsConnectingCloud(true);
+    soundManager.playClick();
+    try {
+      const fbUser = await signInWithGooglePopup();
+      if (!isFirebaseAdminUser(fbUser)) {
+        await signOutFirebase().catch(() => {});
+        setCloudSyncError('Please sign in with the authorized Admin Google account (info.mipodi@gmail.com).');
+        return;
+      }
+      await ensureBootstrappedAdminRecord(fbUser);
+      showToast('Cloud Sync connected across all devices.');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : '';
+      if (!msg.includes('popup-closed-by-user')) {
+        setCloudSyncError('Could not connect Cloud Sync. Please try again.');
+      }
+    } finally {
+      setIsConnectingCloud(false);
+    }
+  };
 
   const openEditUserPage = (u: RegisteredUser) => {
     setSelectedEditUser(u);
@@ -343,6 +478,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           const res = await virtualEngine.depositToUser(targetUserId, amount);
           setDepositRecipient(res.user);
           setUsers(res.users);
+          if (isCloudConnected) {
+            void upsertCloudUser(res.user);
+          }
           setDepositAmountInput('');
           setDepositCountdown(null);
           setDepositSuccessMsg(
@@ -366,6 +504,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       const res = await virtualEngine.updateAdminUser(selectedEditUser.id, editForm);
       setUsers(res.users);
       setSelectedEditUser(res.user);
+      if (isCloudConnected) {
+        void upsertCloudUser(res.user);
+      }
       showToast(`Saved profile info for ${res.user.fullName} (ID #${res.user.id})`);
     } catch (err) {
       setFormError(err instanceof Error ? err.message : 'Unable to save user info.');
@@ -389,7 +530,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setPendingDeleteClubId(null);
     setPendingDeleteUserId(null);
     setActivePage(page);
-    if (page === 'users' || page === 'deposit') {
+    if (page === 'users' || page === 'deposit' || page === 'profile') {
       void loadUsersList();
     }
     if (typeof window !== 'undefined' && page !== 'edit_user') {
@@ -417,6 +558,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
       setClubName('');
       setClubShort('');
+      if (isCloudConnected) {
+        void upsertCloudClub(created);
+      }
       showToast(`Club permanently saved: ${created.crest} ${created.name} (${created.shortName})`);
     } catch (err) {
       setFormError(err instanceof Error ? err.message : 'Unable to create club.');
@@ -457,6 +601,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         defaultCountry: clubCountry
       });
 
+      if (isCloudConnected) {
+        created.forEach(c => void upsertCloudClub(c));
+      }
       setBulkClubsText('');
       showToast(`Permanently saved ${created.length} written ${created.length === 1 ? 'club' : 'clubs'} across all devices!`);
     } catch (err) {
@@ -481,6 +628,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         country: newLeagueCountry.trim() || 'International',
         icon: newLeagueIcon
       });
+      if (isCloudConnected) {
+        void upsertCloudLeague(created);
+      }
       setNewLeagueName('');
       setNewLeagueCountry('International');
       setNewLeagueIcon('🏆');
@@ -512,7 +662,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
     setIsSubmitting(true);
     try {
-      await virtualEngine.fixMatchBetweenClubs({
+      const createdMatch = await virtualEngine.fixMatchBetweenClubs({
         homeClub: home,
         awayClub: away,
         league: matchLeague,
@@ -523,6 +673,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         awayOdds: parseFloat(awayOdds) || 3.40,
         isFeatured
       });
+      if (isCloudConnected) {
+        void upsertCloudMatch(createdMatch, { homeClubId: home.id, awayClubId: away.id });
+      }
       showToast(`Match fixed & synced across all users: ${home.name} vs ${away.name}`);
     } catch (err) {
       setFormError(err instanceof Error ? err.message : 'Unable to fix match.');
@@ -562,6 +715,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setIsSubmitting(true);
     try {
       const created = await virtualEngine.autoGenerateFiveClubs();
+      if (isCloudConnected) {
+        created.forEach(c => void upsertCloudClub(c));
+      }
       showToast(`Auto-generated & permanently saved ${created.length} new clubs across all devices!`);
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Unable to auto-generate clubs.');
@@ -576,6 +732,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setIsSubmitting(true);
     try {
       const result = await virtualEngine.deployThreeClubsPerLeague();
+      if (isCloudConnected) {
+        result.createdClubs.forEach(c => void upsertCloudClub(c));
+      }
       showToast(
         `Deployed ${result.createdClubs.length} permanent clubs (3 per league across ${result.leagueCount} leagues)!`
       );
@@ -619,6 +778,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   const pageTitleMap: Record<AdminPage, string> = {
     hub: 'Admin Dashboard',
+    profile: 'Profile',
     fix_match: 'Fix Match',
     create_club: 'Create New Club',
     club_directory: 'Club Directory',
@@ -630,77 +790,146 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     edit_user: selectedEditUser ? `User Profile #${selectedEditUser.id}` : 'Update User Info'
   };
 
-  const pageSubtitleMap: Record<AdminPage, string> = {
-    hub: 'Manage clubs, leagues, fixtures, user deposits, and registered profiles',
-    fix_match: 'Schedule & fix virtual matches — auto-synced across all users & devices',
-    create_club: 'Register a permanent virtual club until explicitly deleted by admin',
-    club_directory: 'Browse all permanently registered clubs and team power ratings',
-    leagues: 'All currently deployed and active leagues in the system',
-    active: 'Manage live scores, kickoffs, or reset active fixtures',
-    delete_club: 'Permanently delete a club — cannot be undone',
-    deposit: 'Search user by ID, verify recipient full name, and lodge deposit',
-    users: 'All verified registered users — update details or remove profiles',
-    edit_user: 'Registration fields are pre-filled; complete and save remaining user details'
-  };
-
   return (
-    <div className="space-y-4 pb-10 px-3 sm:px-5 pt-3 max-w-5xl mx-auto">
+    <div className="space-y-2.5 pb-6 px-2.5 sm:px-4 pt-2 max-w-5xl mx-auto">
       {/* Top Bar */}
-      <div className="border-b border-[#00e700]/20 pb-3 space-y-2.5">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2.5 min-w-0">
-            {activePage !== 'hub' ? (
+      <div className="border-b border-[#00e700]/20 pb-2 space-y-2">
+        {activePage === 'hub' ? (
+          <>
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <div className="w-8 h-8 rounded-lg bg-[#00ad3a]/20 border border-[#00e700]/40 flex items-center justify-center text-[#00e700] shrink-0">
+                  <ShieldCheck className="w-4 h-4" />
+                </div>
+                <div className="min-w-0">
+                  <h2 className="text-sm sm:text-base font-black text-white tracking-wide truncate">
+                    {pageTitleMap.hub}
+                  </h2>
+                  <p className="text-[10px] sm:text-[11px] text-zinc-400 truncate">
+                    Clubs, leagues, fixtures, deposits &amp; profiles
+                  </p>
+                </div>
+              </div>
+
               <button
-                onClick={() => handleOpenPage(activePage === 'edit_user' ? 'users' : 'hub')}
-                className="h-9 px-3 rounded-xl bg-[#062416] hover:bg-[#0e4425] border border-[#00e700]/35 text-xs font-bold text-[#00e700] flex items-center gap-1.5 transition-all active:scale-95 shrink-0 whitespace-nowrap"
+                type="button"
+                onClick={() => handleOpenPage('profile')}
+                className="h-8 px-2.5 rounded-lg bg-[#062416] hover:bg-[#0e4425] border border-[#00e700]/35 text-[#00e700] text-xs font-bold flex items-center gap-1.5 transition-all active:scale-95 shrink-0 whitespace-nowrap"
               >
-                <ArrowLeft className="w-4 h-4" />
-                <span>Back</span>
+                <User className="w-3.5 h-3.5" />
+                <span>Profile</span>
               </button>
-            ) : (
-              <div className="w-9 h-9 rounded-xl bg-[#00ad3a]/20 border border-[#00e700]/40 flex items-center justify-center text-[#00e700] shrink-0">
-                <ShieldCheck className="w-5 h-5" />
+            </div>
+
+            {/* Hub User ID Search Bar */}
+            <form onSubmit={handleTopSearchById} className="flex items-center gap-1.5">
+              <div className="flex-1 flex items-center bg-[#03150b] border border-[#00e700]/30 focus-within:border-[#00e700] rounded-lg px-2.5 h-8 min-w-0">
+                <Search className="w-3.5 h-3.5 text-[#00e700] mr-1.5 shrink-0" />
+                <input
+                  type="text"
+                  value={topSearchId}
+                  onChange={e => {
+                    setTopSearchId(e.target.value);
+                    if (topSearchError) setTopSearchError(null);
+                  }}
+                  placeholder="Search user by ID (e.g. 100001)"
+                  className="bg-transparent text-xs font-bold text-white placeholder-zinc-500 focus:outline-none w-full font-mono tabular-nums min-w-0"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={isSearchingUser}
+                className="h-8 px-3 rounded-lg bg-[#00ad3a] hover:bg-[#00c844] text-black font-black text-xs whitespace-nowrap active:scale-95 transition-all disabled:opacity-50 shrink-0"
+              >
+                {isSearchingUser ? 'Searching...' : 'Search ID'}
+              </button>
+            </form>
+
+            {topSearchError && (
+              <div className="bg-red-950/70 border border-red-600/50 text-red-200 text-[11px] font-bold px-2.5 py-1.5 rounded-lg">
+                {topSearchError}
               </div>
             )}
 
-            <div className="min-w-0">
-              <h2 className="text-base sm:text-lg font-black text-white tracking-wide truncate">
+            {/* Compact Multi-Device Cloud Sync Bar */}
+            <div className="flex items-center justify-between gap-2 bg-[#03150b] border border-[#00e700]/20 rounded-lg px-2.5 py-1.5">
+              <div className="flex items-center gap-1.5 min-w-0">
+                <Cloud className={`w-3.5 h-3.5 shrink-0 ${isCloudConnected ? 'text-[#00e700]' : 'text-zinc-400'}`} />
+                <span className="text-[11px] font-bold text-zinc-300 truncate">
+                  {isCloudConnected
+                    ? `Cloud Sync Active (${cloudAdminEmail})`
+                    : 'Connect Google to sync Users & Admin across Web & Mobile'}
+                </span>
+              </div>
+              {isCloudConnected ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    soundManager.playClick();
+                    void loadUsersList();
+                    showToast('Cloud & server state synced.');
+                  }}
+                  className="h-6 px-2 rounded bg-[#062416] hover:bg-[#0e4425] border border-[#00e700]/30 text-[#00e700] text-[10px] font-black flex items-center gap-1 shrink-0 whitespace-nowrap"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                  <span>Synced</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  disabled={isConnectingCloud}
+                  onClick={handleConnectCloudSync}
+                  className="h-6 px-2.5 rounded bg-[#00ad3a] hover:bg-[#00c844] text-black text-[10px] font-black shrink-0 whitespace-nowrap active:scale-95 transition-all disabled:opacity-50"
+                >
+                  {isConnectingCloud ? 'Connecting...' : 'Sync Cloud'}
+                </button>
+              )}
+            </div>
+
+            {cloudSyncError && (
+              <div className="bg-red-950/70 border border-red-600/50 text-red-200 text-[11px] font-bold px-2.5 py-1.5 rounded-lg">
+                {cloudSyncError}
+              </div>
+            )}
+          </>
+        ) : (
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <button
+                type="button"
+                onClick={() => handleOpenPage(activePage === 'edit_user' ? 'users' : 'hub')}
+                className="h-7 px-2.5 rounded-lg bg-[#062416] hover:bg-[#0e4425] border border-[#00e700]/35 text-[11px] font-bold text-[#00e700] flex items-center gap-1 transition-all active:scale-95 shrink-0 whitespace-nowrap"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" />
+                <span>Back</span>
+              </button>
+              <h2 className="text-sm sm:text-base font-black text-white tracking-wide truncate">
                 {pageTitleMap[activePage]}
               </h2>
-              <p className="text-[11px] text-zinc-400 truncate">
-                {pageSubtitleMap[activePage]}
-              </p>
             </div>
-          </div>
 
-          <div className="flex items-center gap-2 shrink-0">
             {activePage === 'leagues' && (
-              <div className="flex items-center gap-1.5">
-                {/* Red + button: Auto-generate 5 permanent clubs */}
+              <div className="flex items-center gap-1.5 shrink-0">
                 <button
                   type="button"
                   disabled={isSubmitting}
                   onClick={handleAutoGenerateFiveClubs}
                   aria-label="Auto-generate 5 new clubs"
                   title="Auto-generate 5 permanent new clubs"
-                  className="w-9 h-9 rounded-xl bg-red-600 hover:bg-red-500 text-white font-black flex items-center justify-center shadow-[0_0_14px_rgba(220,38,38,0.45)] active:scale-95 transition-all disabled:opacity-50"
+                  className="w-7 h-7 rounded-lg bg-red-600 hover:bg-red-500 text-white font-black flex items-center justify-center shadow-[0_0_10px_rgba(220,38,38,0.4)] active:scale-95 transition-all disabled:opacity-50"
                 >
-                  <Plus className="w-5 h-5 stroke-[2.75]" />
+                  <Plus className="w-4 h-4 stroke-[2.75]" />
                 </button>
-
-                {/* Blue + button: Auto-deploy 3 different clubs to each league */}
                 <button
                   type="button"
                   disabled={isSubmitting}
                   onClick={handleDeployThreePerLeague}
                   aria-label="Auto-deploy 3 new clubs to each league"
                   title="Auto-deploy 3 different new clubs to each league"
-                  className="w-9 h-9 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-black flex items-center justify-center shadow-[0_0_14px_rgba(37,99,235,0.45)] active:scale-95 transition-all disabled:opacity-50"
+                  className="w-7 h-7 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-black flex items-center justify-center shadow-[0_0_10px_rgba(37,99,235,0.4)] active:scale-95 transition-all disabled:opacity-50"
                 >
-                  <Plus className="w-5 h-5 stroke-[2.75]" />
+                  <Plus className="w-4 h-4 stroke-[2.75]" />
                 </button>
-
-                {/* Green + button: Create Custom League */}
                 <button
                   type="button"
                   disabled={isSubmitting}
@@ -711,277 +940,371 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   }}
                   aria-label="Create Custom League"
                   title="Create Custom League"
-                  className="w-9 h-9 rounded-xl bg-gradient-to-r from-[#00ad3a] to-[#00e700] text-black font-black flex items-center justify-center shadow-[0_0_15px_rgba(0,231,0,0.4)] hover:brightness-110 active:scale-95 transition-all disabled:opacity-50"
+                  className="w-7 h-7 rounded-lg bg-gradient-to-r from-[#00ad3a] to-[#00e700] text-black font-black flex items-center justify-center shadow-[0_0_10px_rgba(0,231,0,0.35)] hover:brightness-110 active:scale-95 transition-all disabled:opacity-50"
                 >
-                  <Plus className="w-5 h-5 stroke-[2.75]" />
+                  <Plus className="w-4 h-4 stroke-[2.75]" />
                 </button>
               </div>
             )}
-
-            <button
-              onClick={() => {
-                soundManager.playClick();
-                onNavigateSports();
-              }}
-              className="h-9 px-3 rounded-xl bg-[#062416] hover:bg-[#0e4425] border border-[#00e700]/35 text-xs font-bold text-white flex items-center gap-1.5 transition-all active:scale-95 shrink-0 whitespace-nowrap"
-            >
-              <span>View Homepage</span>
-            </button>
-          </div>
-        </div>
-
-        {/* Top User ID Search Bar */}
-        <form onSubmit={handleTopSearchById} className="flex items-center gap-2">
-          <div className="flex-1 flex items-center bg-[#03150b] border border-[#00e700]/30 focus-within:border-[#00e700] rounded-xl px-3 h-9">
-            <Search className="w-4 h-4 text-[#00e700] mr-2 shrink-0" />
-            <input
-              type="text"
-              value={topSearchId}
-              onChange={e => {
-                setTopSearchId(e.target.value);
-                if (topSearchError) setTopSearchError(null);
-              }}
-              placeholder="Search user data by ID (e.g. 100001)..."
-              className="bg-transparent text-xs font-bold text-white placeholder-zinc-500 focus:outline-none w-full font-mono tabular-nums"
-            />
-          </div>
-          <button
-            type="submit"
-            disabled={isSearchingUser}
-            className="h-9 px-4 rounded-xl bg-[#00ad3a] hover:bg-[#00c844] text-black font-black text-xs whitespace-nowrap active:scale-95 transition-all disabled:opacity-50 shrink-0"
-          >
-            {isSearchingUser ? 'Searching...' : 'Search ID'}
-          </button>
-        </form>
-
-        {topSearchError && (
-          <div className="bg-red-950/70 border border-red-600/50 text-red-200 text-xs font-bold px-3 py-2 rounded-xl">
-            {topSearchError}
           </div>
         )}
       </div>
 
       {/* Live Toast Feedback */}
       {toastMsg && (
-        <div className="bg-[#00ad3a] text-black font-black px-4 py-2.5 rounded-xl text-xs flex items-center gap-2 shadow-[0_0_15px_rgba(0,231,0,0.4)]">
-          <CheckCircle className="w-4 h-4 shrink-0" />
+        <div className="bg-[#00ad3a] text-black font-black px-3 py-2 rounded-lg text-[11px] flex items-center gap-1.5 shadow-[0_0_12px_rgba(0,231,0,0.35)]">
+          <CheckCircle className="w-3.5 h-3.5 shrink-0" />
           <span>{toastMsg}</span>
         </div>
       )}
 
-      {/* HUB VIEW: ONLY ACTION BUTTONS */}
+      {/* HUB VIEW: COMPACT ACTION BUTTONS */}
       {activePage === 'hub' && (
-        <div className="space-y-4">
+        <div className="space-y-2.5">
           {/* Compact KPI Strip */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-3">
-            <div className="bg-[#051c10]/95 border border-[#00e700]/20 rounded-xl p-3">
-              <span className="text-[10px] sm:text-xs font-bold text-zinc-400 block">Clubs</span>
-              <span className="text-lg sm:text-2xl font-black text-white tabular-nums">{clubs.length}</span>
+          <div className="grid grid-cols-4 gap-1.5">
+            <div className="bg-[#051c10]/95 border border-[#00e700]/20 rounded-lg p-2">
+              <span className="text-[10px] font-bold text-zinc-400 block truncate">Clubs</span>
+              <span className="text-sm sm:text-base font-black text-white tabular-nums">{clubs.length}</span>
             </div>
-            <div className="bg-[#051c10]/95 border border-[#00e700]/20 rounded-xl p-3">
-              <span className="text-[10px] sm:text-xs font-bold text-zinc-400 block">Leagues</span>
-              <span className="text-lg sm:text-2xl font-black text-emerald-300 tabular-nums">{leagues.length}</span>
+            <div className="bg-[#051c10]/95 border border-[#00e700]/20 rounded-lg p-2">
+              <span className="text-[10px] font-bold text-zinc-400 block truncate">Leagues</span>
+              <span className="text-sm sm:text-base font-black text-emerald-300 tabular-nums">{leagues.length}</span>
             </div>
-            <div className="bg-[#051c10]/95 border border-[#00e700]/20 rounded-xl p-3">
-              <span className="text-[10px] sm:text-xs font-bold text-zinc-400 block">Fixed Matches</span>
-              <span className="text-lg sm:text-2xl font-black text-[#00e700] tabular-nums">{matches.length}</span>
+            <div className="bg-[#051c10]/95 border border-[#00e700]/20 rounded-lg p-2">
+              <span className="text-[10px] font-bold text-zinc-400 block truncate">Matches</span>
+              <span className="text-sm sm:text-base font-black text-[#00e700] tabular-nums">{matches.length}</span>
             </div>
-            <div className="bg-[#051c10]/95 border border-[#00e700]/20 rounded-xl p-3">
-              <span className="text-[10px] sm:text-xs font-bold text-zinc-400 block">Live Playing</span>
-              <span className="text-lg sm:text-2xl font-black text-amber-400 tabular-nums">{liveCount}</span>
+            <div className="bg-[#051c10]/95 border border-[#00e700]/20 rounded-lg p-2">
+              <span className="text-[10px] font-bold text-zinc-400 block truncate">Live</span>
+              <span className="text-sm sm:text-base font-black text-amber-400 tabular-nums">{liveCount}</span>
             </div>
           </div>
 
           {/* Dedicated Action Buttons -> Open Separate Pages */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             {/* Deposit */}
             <button
               onClick={() => handleOpenPage('deposit')}
-              className="group w-full text-left bg-gradient-to-br from-[#09321c] to-[#051c10] hover:from-[#0e4728] hover:to-[#072616] border border-[#00e700]/45 hover:border-[#00e700] rounded-2xl p-4 sm:p-5 transition-all active:scale-[0.98] shadow-[0_4px_20px_rgba(0,0,0,0.4)] flex items-center justify-between gap-3"
+              className="group w-full text-left bg-gradient-to-br from-[#09321c] to-[#051c10] hover:from-[#0e4728] hover:to-[#072616] border border-[#00e700]/40 hover:border-[#00e700] rounded-xl p-2.5 sm:p-3.5 transition-all active:scale-[0.98] flex items-center justify-between gap-2.5"
             >
-              <div className="flex items-center gap-3.5 min-w-0">
-                <div className="w-12 h-12 rounded-xl bg-[#00ad3a]/25 border border-[#00e700]/45 flex items-center justify-center text-[#00e700] shrink-0 group-hover:scale-105 transition-transform">
-                  <Wallet className="w-6 h-6" />
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-9 h-9 rounded-lg bg-[#00ad3a]/25 border border-[#00e700]/45 flex items-center justify-center text-[#00e700] shrink-0">
+                  <Wallet className="w-4 h-4" />
                 </div>
                 <div className="min-w-0">
-                  <span className="text-base font-black text-white block">Deposit</span>
-                  <span className="text-xs text-zinc-400 block mt-0.5">
-                    Search user by ID &amp; verify 5s deposit credit
+                  <span className="text-xs sm:text-sm font-black text-white block truncate">Deposit</span>
+                  <span className="text-[10px] sm:text-[11px] text-zinc-400 block truncate">
+                    Search user by ID &amp; 5s credit
                   </span>
                 </div>
               </div>
-              <ChevronRight className="w-5 h-5 text-[#00e700] shrink-0 group-hover:translate-x-0.5 transition-transform" />
+              <ChevronRight className="w-4 h-4 text-[#00e700] shrink-0" />
             </button>
 
             {/* Users */}
             <button
               onClick={() => handleOpenPage('users')}
-              className="group w-full text-left bg-gradient-to-br from-[#09321c] to-[#051c10] hover:from-[#0e4728] hover:to-[#072616] border border-[#00e700]/45 hover:border-[#00e700] rounded-2xl p-4 sm:p-5 transition-all active:scale-[0.98] shadow-[0_4px_20px_rgba(0,0,0,0.4)] flex items-center justify-between gap-3"
+              className="group w-full text-left bg-gradient-to-br from-[#09321c] to-[#051c10] hover:from-[#0e4728] hover:to-[#072616] border border-[#00e700]/40 hover:border-[#00e700] rounded-xl p-2.5 sm:p-3.5 transition-all active:scale-[0.98] flex items-center justify-between gap-2.5"
             >
-              <div className="flex items-center gap-3.5 min-w-0">
-                <div className="w-12 h-12 rounded-xl bg-emerald-500/20 border border-emerald-400/40 flex items-center justify-center text-emerald-300 shrink-0 group-hover:scale-105 transition-transform">
-                  <UserCheck className="w-6 h-6" />
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-9 h-9 rounded-lg bg-emerald-500/20 border border-emerald-400/40 flex items-center justify-center text-emerald-300 shrink-0">
+                  <UserCheck className="w-4 h-4" />
                 </div>
                 <div className="min-w-0">
-                  <span className="text-base font-black text-white block">
-                    Users <span className="text-xs font-bold text-[#00e700] ml-1 tabular-nums">({users.length})</span>
+                  <span className="text-xs sm:text-sm font-black text-white block truncate">
+                    Users <span className="text-[11px] font-bold text-[#00e700] ml-1 tabular-nums">({users.length})</span>
                   </span>
-                  <span className="text-xs text-zinc-400 block mt-0.5">
-                    Verified accounts, update profiles or delete users
+                  <span className="text-[10px] sm:text-[11px] text-zinc-400 block truncate">
+                    Update details or delete profiles
                   </span>
                 </div>
               </div>
-              <ChevronRight className="w-5 h-5 text-emerald-300 shrink-0 group-hover:translate-x-0.5 transition-transform" />
+              <ChevronRight className="w-4 h-4 text-emerald-300 shrink-0" />
             </button>
 
-            {/* 1. Fix Match */}
+            {/* Fix Match */}
             <button
               onClick={() => handleOpenPage('fix_match')}
-              className="group w-full text-left bg-gradient-to-br from-[#09321c] to-[#051c10] hover:from-[#0e4728] hover:to-[#072616] border border-[#00e700]/35 hover:border-[#00e700] rounded-2xl p-4 sm:p-5 transition-all active:scale-[0.98] shadow-[0_4px_20px_rgba(0,0,0,0.4)] flex items-center justify-between gap-3"
+              className="group w-full text-left bg-gradient-to-br from-[#09321c] to-[#051c10] hover:from-[#0e4728] hover:to-[#072616] border border-[#00e700]/35 hover:border-[#00e700] rounded-xl p-2.5 sm:p-3.5 transition-all active:scale-[0.98] flex items-center justify-between gap-2.5"
             >
-              <div className="flex items-center gap-3.5 min-w-0">
-                <div className="w-12 h-12 rounded-xl bg-[#00ad3a]/25 border border-[#00e700]/40 flex items-center justify-center text-[#00e700] shrink-0 group-hover:scale-105 transition-transform">
-                  <Swords className="w-6 h-6" />
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-9 h-9 rounded-lg bg-[#00ad3a]/25 border border-[#00e700]/40 flex items-center justify-center text-[#00e700] shrink-0">
+                  <Swords className="w-4 h-4" />
                 </div>
                 <div className="min-w-0">
-                  <span className="text-base font-black text-white block">Fix Match</span>
-                  <span className="text-xs text-zinc-400 block mt-0.5">
-                    Pair clubs, set odds &amp; sync across all devices
+                  <span className="text-xs sm:text-sm font-black text-white block truncate">Fix Match</span>
+                  <span className="text-[10px] sm:text-[11px] text-zinc-400 block truncate">
+                    Pair clubs, set odds &amp; sync
                   </span>
                 </div>
               </div>
-              <ChevronRight className="w-5 h-5 text-[#00e700] shrink-0 group-hover:translate-x-0.5 transition-transform" />
+              <ChevronRight className="w-4 h-4 text-[#00e700] shrink-0" />
             </button>
 
-            {/* 2. Create New Club */}
+            {/* Create New Club */}
             <button
               onClick={() => handleOpenPage('create_club')}
-              className="group w-full text-left bg-gradient-to-br from-[#09321c] to-[#051c10] hover:from-[#0e4728] hover:to-[#072616] border border-[#00e700]/35 hover:border-[#00e700] rounded-2xl p-4 sm:p-5 transition-all active:scale-[0.98] shadow-[0_4px_20px_rgba(0,0,0,0.4)] flex items-center justify-between gap-3"
+              className="group w-full text-left bg-gradient-to-br from-[#09321c] to-[#051c10] hover:from-[#0e4728] hover:to-[#072616] border border-[#00e700]/35 hover:border-[#00e700] rounded-xl p-2.5 sm:p-3.5 transition-all active:scale-[0.98] flex items-center justify-between gap-2.5"
             >
-              <div className="flex items-center gap-3.5 min-w-0">
-                <div className="w-12 h-12 rounded-xl bg-[#00ad3a]/25 border border-[#00e700]/40 flex items-center justify-center text-[#00e700] shrink-0 group-hover:scale-105 transition-transform">
-                  <PlusCircle className="w-6 h-6" />
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-9 h-9 rounded-lg bg-[#00ad3a]/25 border border-[#00e700]/40 flex items-center justify-center text-[#00e700] shrink-0">
+                  <PlusCircle className="w-4 h-4" />
                 </div>
                 <div className="min-w-0">
-                  <span className="text-base font-black text-white block">Create New Club</span>
-                  <span className="text-xs text-zinc-400 block mt-0.5">
-                    Add a permanent club with custom crest &amp; ratings
+                  <span className="text-xs sm:text-sm font-black text-white block truncate">Create New Club</span>
+                  <span className="text-[10px] sm:text-[11px] text-zinc-400 block truncate">
+                    Permanent club with crest &amp; stats
                   </span>
                 </div>
               </div>
-              <ChevronRight className="w-5 h-5 text-[#00e700] shrink-0 group-hover:translate-x-0.5 transition-transform" />
+              <ChevronRight className="w-4 h-4 text-[#00e700] shrink-0" />
             </button>
 
-            {/* 3. Club Directory */}
+            {/* Club Directory */}
             <button
               onClick={() => handleOpenPage('club_directory')}
-              className="group w-full text-left bg-gradient-to-br from-[#09321c] to-[#051c10] hover:from-[#0e4728] hover:to-[#072616] border border-[#00e700]/35 hover:border-[#00e700] rounded-2xl p-4 sm:p-5 transition-all active:scale-[0.98] shadow-[0_4px_20px_rgba(0,0,0,0.4)] flex items-center justify-between gap-3"
+              className="group w-full text-left bg-gradient-to-br from-[#09321c] to-[#051c10] hover:from-[#0e4728] hover:to-[#072616] border border-[#00e700]/35 hover:border-[#00e700] rounded-xl p-2.5 sm:p-3.5 transition-all active:scale-[0.98] flex items-center justify-between gap-2.5"
             >
-              <div className="flex items-center gap-3.5 min-w-0">
-                <div className="w-12 h-12 rounded-xl bg-[#00ad3a]/25 border border-[#00e700]/40 flex items-center justify-center text-[#00e700] shrink-0 group-hover:scale-105 transition-transform">
-                  <Users className="w-6 h-6" />
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-9 h-9 rounded-lg bg-[#00ad3a]/25 border border-[#00e700]/40 flex items-center justify-center text-[#00e700] shrink-0">
+                  <Users className="w-4 h-4" />
                 </div>
                 <div className="min-w-0">
-                  <span className="text-base font-black text-white block">
-                    Club Directory <span className="text-xs font-bold text-[#00e700] ml-1">({clubs.length})</span>
+                  <span className="text-xs sm:text-sm font-black text-white block truncate">
+                    Club Directory <span className="text-[11px] font-bold text-[#00e700] ml-1 tabular-nums">({clubs.length})</span>
                   </span>
-                  <span className="text-xs text-zinc-400 block mt-0.5">
-                    View all registered clubs &amp; power ratings
+                  <span className="text-[10px] sm:text-[11px] text-zinc-400 block truncate">
+                    Registered clubs &amp; power ratings
                   </span>
                 </div>
               </div>
-              <ChevronRight className="w-5 h-5 text-[#00e700] shrink-0 group-hover:translate-x-0.5 transition-transform" />
+              <ChevronRight className="w-4 h-4 text-[#00e700] shrink-0" />
             </button>
 
-            {/* 4. Leagues */}
+            {/* Leagues */}
             <button
               onClick={() => handleOpenPage('leagues')}
-              className="group w-full text-left bg-gradient-to-br from-[#09321c] to-[#051c10] hover:from-[#0e4728] hover:to-[#072616] border border-[#00e700]/35 hover:border-[#00e700] rounded-2xl p-4 sm:p-5 transition-all active:scale-[0.98] shadow-[0_4px_20px_rgba(0,0,0,0.4)] flex items-center justify-between gap-3"
+              className="group w-full text-left bg-gradient-to-br from-[#09321c] to-[#051c10] hover:from-[#0e4728] hover:to-[#072616] border border-[#00e700]/35 hover:border-[#00e700] rounded-xl p-2.5 sm:p-3.5 transition-all active:scale-[0.98] flex items-center justify-between gap-2.5"
             >
-              <div className="flex items-center gap-3.5 min-w-0">
-                <div className="w-12 h-12 rounded-xl bg-emerald-500/20 border border-emerald-400/40 flex items-center justify-center text-emerald-300 shrink-0 group-hover:scale-105 transition-transform">
-                  <Trophy className="w-6 h-6" />
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-9 h-9 rounded-lg bg-emerald-500/20 border border-emerald-400/40 flex items-center justify-center text-emerald-300 shrink-0">
+                  <Trophy className="w-4 h-4" />
                 </div>
                 <div className="min-w-0">
-                  <span className="text-base font-black text-white block">
-                    Leagues <span className="text-xs font-bold text-emerald-300 ml-1">({leagues.length})</span>
+                  <span className="text-xs sm:text-sm font-black text-white block truncate">
+                    Leagues <span className="text-[11px] font-bold text-emerald-300 ml-1 tabular-nums">({leagues.length})</span>
                   </span>
-                  <span className="text-xs text-zinc-400 block mt-0.5">
-                    View deployed leagues &amp; create custom leagues
+                  <span className="text-[10px] sm:text-[11px] text-zinc-400 block truncate">
+                    Deployed leagues &amp; custom league
                   </span>
                 </div>
               </div>
-              <ChevronRight className="w-5 h-5 text-emerald-300 shrink-0 group-hover:translate-x-0.5 transition-transform" />
+              <ChevronRight className="w-4 h-4 text-emerald-300 shrink-0" />
             </button>
 
-            {/* 5. Active */}
+            {/* Active */}
             <button
               onClick={() => handleOpenPage('active')}
-              className="group w-full text-left bg-gradient-to-br from-[#09321c] to-[#051c10] hover:from-[#0e4728] hover:to-[#072616] border border-[#00e700]/35 hover:border-[#00e700] rounded-2xl p-4 sm:p-5 transition-all active:scale-[0.98] shadow-[0_4px_20px_rgba(0,0,0,0.4)] flex items-center justify-between gap-3"
+              className="group w-full text-left bg-gradient-to-br from-[#09321c] to-[#051c10] hover:from-[#0e4728] hover:to-[#072616] border border-[#00e700]/35 hover:border-[#00e700] rounded-xl p-2.5 sm:p-3.5 transition-all active:scale-[0.98] flex items-center justify-between gap-2.5"
             >
-              <div className="flex items-center gap-3.5 min-w-0">
-                <div className="w-12 h-12 rounded-xl bg-amber-500/20 border border-amber-400/40 flex items-center justify-center text-amber-400 shrink-0 group-hover:scale-105 transition-transform">
-                  <CalendarCheck className="w-6 h-6" />
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-9 h-9 rounded-lg bg-amber-500/20 border border-amber-400/40 flex items-center justify-center text-amber-400 shrink-0">
+                  <CalendarCheck className="w-4 h-4" />
                 </div>
                 <div className="min-w-0">
-                  <span className="text-base font-black text-white block">
-                    Active <span className="text-xs font-bold text-amber-400 ml-1">({matches.length})</span>
+                  <span className="text-xs sm:text-sm font-black text-white block truncate">
+                    Active <span className="text-[11px] font-bold text-amber-400 ml-1 tabular-nums">({matches.length})</span>
                   </span>
-                  <span className="text-xs text-zinc-400 block mt-0.5">
-                    Control kickoffs, live goals &amp; reset matches
+                  <span className="text-[10px] sm:text-[11px] text-zinc-400 block truncate">
+                    Kickoffs, live goals &amp; match resets
                   </span>
                 </div>
               </div>
-              <ChevronRight className="w-5 h-5 text-amber-400 shrink-0 group-hover:translate-x-0.5 transition-transform" />
+              <ChevronRight className="w-4 h-4 text-amber-400 shrink-0" />
             </button>
 
-            {/* 6. Delete Club */}
+            {/* Delete Club */}
             <button
               onClick={() => handleOpenPage('delete_club')}
-              className="group w-full text-left bg-gradient-to-br from-[#1f0d10] to-[#0b0708] hover:from-[#2c1116] hover:to-[#130a0c] border border-red-500/35 hover:border-red-400 rounded-2xl p-4 sm:p-5 transition-all active:scale-[0.98] shadow-[0_4px_20px_rgba(0,0,0,0.4)] flex items-center justify-between gap-3"
+              className="group w-full text-left bg-gradient-to-br from-[#1f0d10] to-[#0b0708] hover:from-[#2c1116] hover:to-[#130a0c] border border-red-500/35 hover:border-red-400 rounded-xl p-2.5 sm:p-3.5 transition-all active:scale-[0.98] flex items-center justify-between gap-2.5"
             >
-              <div className="flex items-center gap-3.5 min-w-0">
-                <div className="w-12 h-12 rounded-xl bg-red-500/20 border border-red-500/40 flex items-center justify-center text-red-400 shrink-0 group-hover:scale-105 transition-transform">
-                  <Trash2 className="w-6 h-6" />
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-9 h-9 rounded-lg bg-red-500/20 border border-red-500/40 flex items-center justify-center text-red-400 shrink-0">
+                  <Trash2 className="w-4 h-4" />
                 </div>
                 <div className="min-w-0">
-                  <span className="text-base font-black text-white block">Delete Club</span>
-                  <span className="text-xs text-zinc-400 block mt-0.5">
-                    Permanently remove clubs (cannot be undone)
+                  <span className="text-xs sm:text-sm font-black text-white block truncate">Delete Club</span>
+                  <span className="text-[10px] sm:text-[11px] text-zinc-400 block truncate">
+                    Permanently remove clubs
                   </span>
                 </div>
               </div>
-              <ChevronRight className="w-5 h-5 text-red-400 shrink-0 group-hover:translate-x-0.5 transition-transform" />
+              <ChevronRight className="w-4 h-4 text-red-400 shrink-0" />
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* ADMIN PROFILE PAGE */}
+      {activePage === 'profile' && (
+        <div className="space-y-2.5">
+          <div className="bg-[#051c10]/95 border border-[#00e700]/25 rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="w-10 h-10 rounded-xl bg-[#03150b] border border-[#00e700]/40 flex items-center justify-center text-xl shrink-0">
+                🛡️
+              </div>
+              <div className="min-w-0">
+                <h3 className="text-sm font-black text-white truncate">CAS9i Admin</h3>
+                <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-zinc-400">
+                  <span className="truncate">{adminEmail}</span>
+                  <span aria-hidden="true">·</span>
+                  <span className="font-mono font-bold text-[#00e700] tabular-nums">
+                    ${adminBalance.toFixed(2)}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={() => handleOpenPage('deposit')}
+                className="h-8 px-2.5 rounded-lg bg-[#00ad3a] hover:bg-[#00c844] text-black font-black text-[11px] flex items-center gap-1 whitespace-nowrap"
+              >
+                <Wallet className="w-3.5 h-3.5" />
+                <span>Deposit</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => handleOpenPage('users')}
+                className="h-8 px-2.5 rounded-lg bg-[#062416] hover:bg-[#0e4425] border border-[#00e700]/35 text-white font-bold text-[11px] flex items-center gap-1 whitespace-nowrap"
+              >
+                <UserCheck className="w-3.5 h-3.5 text-[#00e700]" />
+                <span>Users ({users.length})</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  soundManager.playClick();
+                  onLogout();
+                }}
+                className="h-8 px-2.5 rounded-lg bg-red-950/60 hover:bg-red-900/80 border border-red-500/40 text-red-200 font-bold text-[11px] flex items-center gap-1 whitespace-nowrap"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+                <span>Logout</span>
+              </button>
+            </div>
+          </div>
+
+          <div className="bg-[#051c10]/95 border border-[#00e700]/25 rounded-xl p-3 space-y-2">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-[#00e700]/15 pb-2">
+              <h3 className="text-xs font-black text-white">User Profiles ({users.length})</h3>
+              <div className="flex items-center bg-[#03150b] border border-zinc-700 rounded-lg px-2.5 h-8">
+                <Search className="w-3.5 h-3.5 text-zinc-400 mr-1.5 shrink-0" />
+                <input
+                  type="text"
+                  value={usersFilter}
+                  onChange={e => setUsersFilter(e.target.value)}
+                  placeholder="Filter ID, username, name..."
+                  className="bg-transparent text-xs text-white placeholder-zinc-500 focus:outline-none w-full sm:w-48"
+                />
+              </div>
+            </div>
+
+            {filteredUsers.length === 0 ? (
+              <p className="text-xs text-zinc-400 py-6 text-center">
+                No verified user profiles yet. New accounts start at $0.00 until deposit.
+              </p>
+            ) : (
+              <div className="space-y-1.5 max-h-[60vh] overflow-y-auto pr-0.5">
+                {filteredUsers.map(u => (
+                  <div
+                    key={u.id}
+                    className="bg-[#062416] border border-[#00e700]/20 rounded-lg p-2 flex flex-col sm:flex-row sm:items-center justify-between gap-2"
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <div className="w-8 h-8 rounded-lg bg-[#03150b] border border-[#00e700]/30 flex items-center justify-center text-base shrink-0">
+                        {u.avatar}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="text-xs font-black text-white truncate">{u.fullName}</span>
+                          <span className="text-[11px] font-mono font-bold text-[#00e700] tabular-nums">#{u.id}</span>
+                          <span className="text-[11px] text-zinc-400 truncate">@{u.username}</span>
+                        </div>
+                        <div className="flex items-center gap-1.5 text-[10px] text-zinc-400 flex-wrap">
+                          <span className="font-mono font-bold text-[#00e700] tabular-nums">
+                            ${u.balance.toFixed(2)}
+                          </span>
+                          <span aria-hidden="true">·</span>
+                          <span className="tabular-nums">
+                            {(u.placedBetsCount ?? 0) + (u.fxPositionsCount ?? 0)} bets
+                          </span>
+                          <span aria-hidden="true">·</span>
+                          <span>{u.accountTier || 'Standard'}</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => openEditUserPage(u)}
+                        className="h-7 px-2.5 rounded-md bg-[#00ad3a] hover:bg-[#00c844] text-black text-[11px] font-black flex items-center gap-1 whitespace-nowrap"
+                      >
+                        <Edit3 className="w-3 h-3" />
+                        <span>Update</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          soundManager.playClick();
+                          setDepositRecipient(u);
+                          setDepositSearchId(u.id);
+                          setDepositError(null);
+                          setDepositSuccessMsg(null);
+                          handleOpenPage('deposit');
+                        }}
+                        className="h-7 px-2.5 rounded-md bg-[#03150b] hover:bg-[#0a2f1c] border border-[#00e700]/35 text-[#00e700] text-[11px] font-bold flex items-center gap-1 whitespace-nowrap"
+                      >
+                        <Wallet className="w-3 h-3" />
+                        <span>Deposit</span>
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}
 
       {/* PAGE 1: FIX MATCH BETWEEN CLUBS */}
       {activePage === 'fix_match' && (
-        <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
+        <div className="grid grid-cols-1 md:grid-cols-12 gap-2.5">
           <form
             onSubmit={handleFixMatchBetweenClubs}
-            className="md:col-span-7 bg-[#051c10]/95 border border-[#00e700]/25 rounded-2xl p-3 sm:p-4 space-y-3"
+            className="md:col-span-7 bg-[#051c10]/95 border border-[#00e700]/25 rounded-xl p-2.5 sm:p-3.5 space-y-2.5"
           >
-            <div className="flex items-center justify-between border-b border-[#00e700]/15 pb-2">
-              <h3 className="text-sm font-black text-white">Fix Match Between Clubs</h3>
-              <span className="text-[11px] text-[#00e700] font-bold">Auto-syncs to all devices</span>
+            <div className="flex items-center justify-between border-b border-[#00e700]/15 pb-1.5">
+              <h3 className="text-xs sm:text-sm font-black text-white">Fix Match Between Clubs</h3>
+              <span className="text-[10px] text-[#00e700] font-bold">Auto-syncs all devices</span>
             </div>
 
             {formError && (
-              <div className="bg-red-950/70 border border-red-600/50 text-red-200 text-xs font-bold p-2.5 rounded-xl">
+              <div className="bg-red-950/70 border border-red-600/50 text-red-200 text-[11px] font-bold p-2 rounded-lg">
                 {formError}
               </div>
             )}
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+            <div className="grid grid-cols-2 gap-2">
               <div>
-                <label className="text-xs font-bold text-zinc-400 block mb-1">Home Club (1)</label>
+                <label className="text-[10px] font-bold text-zinc-400 block mb-0.5">Home Club (1)</label>
                 <select
                   value={homeClubId}
                   onChange={e => setHomeClubId(e.target.value)}
-                  className="w-full bg-[#03150b] border border-[#00e700]/30 rounded-xl px-3 py-2.5 text-xs font-bold text-white focus:outline-none focus:border-[#00e700]"
+                  className="w-full h-8 bg-[#03150b] border border-[#00e700]/30 rounded-lg px-2 text-[11px] font-bold text-white focus:outline-none focus:border-[#00e700]"
                 >
                   {clubs.map(c => (
                     <option key={c.id} value={c.id}>
@@ -992,11 +1315,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               </div>
 
               <div>
-                <label className="text-xs font-bold text-zinc-400 block mb-1">Away Club (2)</label>
+                <label className="text-[10px] font-bold text-zinc-400 block mb-0.5">Away Club (2)</label>
                 <select
                   value={awayClubId}
                   onChange={e => setAwayClubId(e.target.value)}
-                  className="w-full bg-[#03150b] border border-[#00e700]/30 rounded-xl px-3 py-2.5 text-xs font-bold text-white focus:outline-none focus:border-[#00e700]"
+                  className="w-full h-8 bg-[#03150b] border border-[#00e700]/30 rounded-lg px-2 text-[11px] font-bold text-white focus:outline-none focus:border-[#00e700]"
                 >
                   {clubs.map(c => (
                     <option key={c.id} value={c.id}>
@@ -1007,13 +1330,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
               <div>
-                <label className="text-xs font-bold text-zinc-400 block mb-1">Competition / League</label>
+                <label className="text-[10px] font-bold text-zinc-400 block mb-0.5">Competition / League</label>
                 <select
                   value={matchLeague}
                   onChange={e => setMatchLeague(e.target.value)}
-                  className="w-full bg-[#03150b] border border-zinc-700 rounded-xl px-3 py-2 text-xs font-bold text-white focus:outline-none focus:border-[#00e700]"
+                  className="w-full h-8 bg-[#03150b] border border-zinc-700 rounded-lg px-2 text-[11px] font-bold text-white focus:outline-none focus:border-[#00e700]"
                 >
                   {leagues.map(l => (
                     <option key={l.id} value={l.name}>
@@ -1025,11 +1348,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="text-xs font-bold text-zinc-400 block mb-1">Start Status</label>
+                  <label className="text-[10px] font-bold text-zinc-400 block mb-0.5">Start Status</label>
                   <select
                     value={matchStatus}
                     onChange={e => setMatchStatus(e.target.value as 'UPCOMING' | 'LIVE')}
-                    className="w-full bg-[#03150b] border border-zinc-700 rounded-xl px-2.5 py-2 text-xs font-bold text-white focus:outline-none focus:border-[#00e700]"
+                    className="w-full h-8 bg-[#03150b] border border-zinc-700 rounded-lg px-2 text-[11px] font-bold text-white focus:outline-none focus:border-[#00e700]"
                   >
                     <option value="UPCOMING">Upcoming</option>
                     <option value="LIVE">Live Now</option>
@@ -1037,7 +1360,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </div>
 
                 <div>
-                  <label className="text-xs font-bold text-zinc-400 block mb-1">Starts In (min)</label>
+                  <label className="text-[10px] font-bold text-zinc-400 block mb-0.5">Starts (min)</label>
                   <input
                     type="number"
                     min={1}
@@ -1045,15 +1368,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     disabled={matchStatus === 'LIVE'}
                     value={countdownMins}
                     onChange={e => setCountdownMins(Math.max(1, Number(e.target.value) || 1))}
-                    className="w-full bg-[#03150b] border border-zinc-700 rounded-xl px-3 py-2 text-xs font-bold text-white focus:outline-none focus:border-[#00e700] disabled:opacity-40 tabular-nums"
+                    className="w-full h-8 bg-[#03150b] border border-zinc-700 rounded-lg px-2.5 text-[11px] font-bold text-white focus:outline-none focus:border-[#00e700] disabled:opacity-40 tabular-nums"
                   />
                 </div>
               </div>
             </div>
 
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-3 gap-1.5">
               <div>
-                <label className="text-xs font-bold text-zinc-400 block mb-1">Home (1)</label>
+                <label className="text-[10px] font-bold text-zinc-400 block mb-0.5">Home (1)</label>
                 <input
                   type="number"
                   step="0.01"
@@ -1061,11 +1384,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   required
                   value={homeOdds}
                   onChange={e => setHomeOdds(e.target.value)}
-                  className="w-full bg-[#03150b] border border-zinc-700 rounded-xl px-3 py-2 text-xs font-black text-[#00e700] tabular-nums focus:outline-none focus:border-[#00e700]"
+                  className="w-full h-8 bg-[#03150b] border border-zinc-700 rounded-lg px-2.5 text-xs font-black text-[#00e700] tabular-nums focus:outline-none focus:border-[#00e700]"
                 />
               </div>
               <div>
-                <label className="text-xs font-bold text-zinc-400 block mb-1">Draw (X)</label>
+                <label className="text-[10px] font-bold text-zinc-400 block mb-0.5">Draw (X)</label>
                 <input
                   type="number"
                   step="0.01"
@@ -1073,11 +1396,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   required
                   value={drawOdds}
                   onChange={e => setDrawOdds(e.target.value)}
-                  className="w-full bg-[#03150b] border border-zinc-700 rounded-xl px-3 py-2 text-xs font-black text-[#00e700] tabular-nums focus:outline-none focus:border-[#00e700]"
+                  className="w-full h-8 bg-[#03150b] border border-zinc-700 rounded-lg px-2.5 text-xs font-black text-[#00e700] tabular-nums focus:outline-none focus:border-[#00e700]"
                 />
               </div>
               <div>
-                <label className="text-xs font-bold text-zinc-400 block mb-1">Away (2)</label>
+                <label className="text-[10px] font-bold text-zinc-400 block mb-0.5">Away (2)</label>
                 <input
                   type="number"
                   step="0.01"
@@ -1085,12 +1408,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   required
                   value={awayOdds}
                   onChange={e => setAwayOdds(e.target.value)}
-                  className="w-full bg-[#03150b] border border-zinc-700 rounded-xl px-3 py-2 text-xs font-black text-[#00e700] tabular-nums focus:outline-none focus:border-[#00e700]"
+                  className="w-full h-8 bg-[#03150b] border border-zinc-700 rounded-lg px-2.5 text-xs font-black text-[#00e700] tabular-nums focus:outline-none focus:border-[#00e700]"
                 />
               </div>
             </div>
 
-            <label className="flex items-center justify-between p-2.5 bg-[#03150b] rounded-xl border border-zinc-800 text-xs cursor-pointer">
+            <label className="flex items-center justify-between p-2 bg-[#03150b] rounded-lg border border-zinc-800 text-[11px] cursor-pointer">
               <span className="font-bold text-zinc-300">Feature as Homepage Hero Match</span>
               <input
                 type="checkbox"
@@ -1103,22 +1426,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             <button
               type="submit"
               disabled={isSubmitting || clubs.length < 2}
-              className="w-full h-11 rounded-xl bg-gradient-to-r from-[#00ad3a] to-[#00e700] text-black font-black text-xs sm:text-sm uppercase tracking-wider shadow-[0_0_20px_rgba(0,231,0,0.35)] hover:brightness-110 active:scale-[0.98] transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+              className="w-full h-9 rounded-lg bg-gradient-to-r from-[#00ad3a] to-[#00e700] text-black font-black text-xs uppercase tracking-wider shadow-[0_0_16px_rgba(0,231,0,0.3)] hover:brightness-110 active:scale-[0.98] transition-all flex items-center justify-center gap-1.5 disabled:opacity-50"
             >
-              <PlusCircle className="w-4 h-4" />
+              <PlusCircle className="w-3.5 h-3.5" />
               <span>{isSubmitting ? 'Publishing...' : 'Fix & Publish Match'}</span>
             </button>
           </form>
 
           {/* Quick Official Packs */}
-          <div className="md:col-span-5 bg-[#051c10]/95 border border-[#00e700]/25 rounded-2xl p-3 sm:p-4 space-y-3">
-            <div className="border-b border-[#00e700]/15 pb-2">
-              <h3 className="text-sm font-black text-white">Quick Fixture Presets</h3>
-              <span className="text-[11px] text-zinc-400">Instant matchday deployment</span>
+          <div className="md:col-span-5 bg-[#051c10]/95 border border-[#00e700]/25 rounded-xl p-2.5 sm:p-3.5 space-y-2">
+            <div className="border-b border-[#00e700]/15 pb-1.5">
+              <h3 className="text-xs sm:text-sm font-black text-white">Quick Fixture Presets</h3>
             </div>
 
-            <div className="space-y-2.5">
-              <div className="bg-[#062416] p-3 rounded-xl border border-[#00e700]/25 flex items-center justify-between gap-2">
+            <div className="space-y-1.5">
+              <div className="bg-[#062416] p-2 rounded-lg border border-[#00e700]/25 flex items-center justify-between gap-2">
                 <div className="min-w-0">
                   <span className="text-[10px] text-zinc-400 font-bold block">Copa del Rey Hero</span>
                   <span className="text-xs font-black text-white truncate block">{PRESET_FIXTURES_INFO.featuredTitle}</span>
@@ -1127,13 +1449,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   type="button"
                   disabled={isSubmitting}
                   onClick={() => handleFixPreset('featured')}
-                  className="h-9 px-3 rounded-lg bg-[#00ad3a] hover:bg-[#00c844] text-white font-black text-xs shrink-0 active:scale-95 transition-all disabled:opacity-50"
+                  className="h-7 px-2.5 rounded-md bg-[#00ad3a] hover:bg-[#00c844] text-black font-black text-[11px] shrink-0 active:scale-95 transition-all disabled:opacity-50"
                 >
                   Fix
                 </button>
               </div>
 
-              <div className="bg-[#062416] p-3 rounded-xl border border-[#00e700]/25 flex items-center justify-between gap-2">
+              <div className="bg-[#062416] p-2 rounded-lg border border-[#00e700]/25 flex items-center justify-between gap-2">
                 <div className="min-w-0">
                   <span className="text-[10px] text-zinc-400 font-bold block">Featured + Live Euro U21</span>
                   <span className="text-xs font-black text-white truncate block">{PRESET_FIXTURES_INFO.pairTitle}</span>
@@ -1142,13 +1464,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   type="button"
                   disabled={isSubmitting}
                   onClick={() => handleFixPreset('copa_and_euro')}
-                  className="h-9 px-3 rounded-lg bg-[#00ad3a] hover:bg-[#00c844] text-white font-black text-xs shrink-0 active:scale-95 transition-all disabled:opacity-50"
+                  className="h-7 px-2.5 rounded-md bg-[#00ad3a] hover:bg-[#00c844] text-black font-black text-[11px] shrink-0 active:scale-95 transition-all disabled:opacity-50"
                 >
                   Fix Pair
                 </button>
               </div>
 
-              <div className="bg-[#062416] p-3 rounded-xl border border-[#00e700]/25 flex items-center justify-between gap-2">
+              <div className="bg-[#062416] p-2 rounded-lg border border-[#00e700]/25 flex items-center justify-between gap-2">
                 <div className="min-w-0">
                   <span className="text-[10px] text-zinc-400 font-bold block">Full Virtual Matchday</span>
                   <span className="text-xs font-black text-white truncate block">All {PRESET_FIXTURES_INFO.allCount} Virtual Fixtures</span>
@@ -1157,7 +1479,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   type="button"
                   disabled={isSubmitting}
                   onClick={() => handleFixPreset('all')}
-                  className="h-9 px-3 rounded-lg bg-gradient-to-r from-[#00ad3a] to-[#00e700] text-black font-black text-xs shrink-0 active:scale-95 transition-all disabled:opacity-50"
+                  className="h-7 px-2.5 rounded-md bg-gradient-to-r from-[#00ad3a] to-[#00e700] text-black font-black text-[11px] shrink-0 active:scale-95 transition-all disabled:opacity-50"
                 >
                   Fix All {PRESET_FIXTURES_INFO.allCount}
                 </button>
@@ -1170,60 +1492,51 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       {/* PAGE 2: CREATE NEW CLUB (WRITE SINGLE OR MULTIPLE CLUBS PERMANENTLY) */}
       {activePage === 'create_club' && (
         <div className="max-w-xl mx-auto">
-          <div className="bg-[#051c10]/95 border border-[#00e700]/25 rounded-2xl p-4 sm:p-5 space-y-3.5">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 border-b border-[#00e700]/15 pb-3">
-              <div>
-                <h3 className="text-sm sm:text-base font-black text-white">Create &amp; Write New Clubs</h3>
-                <span className="text-[11px] text-zinc-400">
-                  Permanently saved — remains in Club Directory unless deleted by Admin
-                </span>
-              </div>
-
-              <div className="bg-[#03150b] p-1 rounded-xl border border-zinc-800 grid grid-cols-2 gap-1 shrink-0">
-                <button
-                  type="button"
-                  onClick={() => {
-                    soundManager.playClick();
-                    setFormError(null);
-                    setClubCreateMode('single');
-                  }}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-black transition-all ${
-                    clubCreateMode === 'single'
-                      ? 'bg-[#00ad3a] text-white shadow'
-                      : 'text-zinc-400 hover:text-white'
-                  }`}
-                >
-                  Single Club
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    soundManager.playClick();
-                    setFormError(null);
-                    setClubCreateMode('bulk');
-                  }}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-black transition-all ${
-                    clubCreateMode === 'bulk'
-                      ? 'bg-[#00ad3a] text-white shadow'
-                      : 'text-zinc-400 hover:text-white'
-                  }`}
-                >
-                  Write Multiple
-                </button>
-              </div>
+          <div className="bg-[#051c10]/95 border border-[#00e700]/25 rounded-xl p-3 sm:p-4 space-y-2.5">
+            <div className="bg-[#03150b] p-1 rounded-lg border border-zinc-800 grid grid-cols-2 gap-1">
+              <button
+                type="button"
+                onClick={() => {
+                  soundManager.playClick();
+                  setFormError(null);
+                  setClubCreateMode('single');
+                }}
+                className={`py-1.5 rounded-md text-[11px] font-black transition-all ${
+                  clubCreateMode === 'single'
+                    ? 'bg-[#00ad3a] text-white shadow'
+                    : 'text-zinc-400 hover:text-white'
+                }`}
+              >
+                Single Club
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  soundManager.playClick();
+                  setFormError(null);
+                  setClubCreateMode('bulk');
+                }}
+                className={`py-1.5 rounded-md text-[11px] font-black transition-all ${
+                  clubCreateMode === 'bulk'
+                    ? 'bg-[#00ad3a] text-white shadow'
+                    : 'text-zinc-400 hover:text-white'
+                }`}
+              >
+                Write Multiple
+              </button>
             </div>
 
             {formError && (
-              <div className="bg-red-950/70 border border-red-600/50 text-red-200 text-xs font-bold p-2.5 rounded-xl">
+              <div className="bg-red-950/70 border border-red-600/50 text-red-200 text-[11px] font-bold p-2 rounded-lg">
                 {formError}
               </div>
             )}
 
             {clubCreateMode === 'single' ? (
-              <form onSubmit={handleCreateClub} className="space-y-3.5">
+              <form onSubmit={handleCreateClub} className="space-y-2.5">
                 <div>
-                  <label className="text-xs font-bold text-zinc-400 block mb-1.5">Club Crest</label>
-                  <div className="flex flex-wrap gap-1.5 bg-[#03150b] p-2.5 rounded-xl border border-zinc-800">
+                  <label className="text-[10px] font-bold text-zinc-400 block mb-1">Club Crest</label>
+                  <div className="flex flex-wrap gap-1 bg-[#03150b] p-1.5 rounded-lg border border-zinc-800">
                     {CREST_OPTIONS.map(cr => (
                       <button
                         type="button"
@@ -1232,8 +1545,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           soundManager.playClick();
                           setClubCrest(cr);
                         }}
-                        className={`w-9 h-9 rounded-lg text-lg flex items-center justify-center transition-all ${
-                          clubCrest === cr ? 'bg-[#00ad3a]/40 ring-2 ring-[#00e700] scale-105' : 'hover:bg-white/5'
+                        className={`w-8 h-8 rounded-md text-base flex items-center justify-center transition-all ${
+                          clubCrest === cr ? 'bg-[#00ad3a]/40 ring-2 ring-[#00e700]' : 'hover:bg-white/5'
                         }`}
                       >
                         {cr}
@@ -1242,34 +1555,34 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   </div>
                 </div>
 
-                <div className="grid grid-cols-3 gap-2.5">
+                <div className="grid grid-cols-3 gap-2">
                   <div className="col-span-2">
-                    <label className="text-xs font-bold text-zinc-400 block mb-1">Club Name</label>
+                    <label className="text-[10px] font-bold text-zinc-400 block mb-0.5">Club Name</label>
                     <input
                       type="text"
                       required
                       placeholder="e.g. Liverpool"
                       value={clubName}
                       onChange={e => setClubName(e.target.value)}
-                      className="w-full bg-[#03150b] border border-zinc-700 rounded-xl px-3 py-2.5 text-xs font-bold text-white focus:outline-none focus:border-[#00e700]"
+                      className="w-full bg-[#03150b] border border-zinc-700 rounded-lg px-2.5 py-1.5 text-[11px] font-bold text-white focus:outline-none focus:border-[#00e700]"
                     />
                   </div>
                   <div>
-                    <label className="text-xs font-bold text-zinc-400 block mb-1">Code</label>
+                    <label className="text-[10px] font-bold text-zinc-400 block mb-0.5">Code</label>
                     <input
                       type="text"
                       maxLength={4}
                       placeholder="LIV"
                       value={clubShort}
                       onChange={e => setClubShort(e.target.value.toUpperCase())}
-                      className="w-full bg-[#03150b] border border-zinc-700 rounded-xl px-3 py-2.5 text-xs font-black text-white uppercase focus:outline-none focus:border-[#00e700]"
+                      className="w-full bg-[#03150b] border border-zinc-700 rounded-lg px-2.5 py-1.5 text-[11px] font-black text-white uppercase focus:outline-none focus:border-[#00e700]"
                     />
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <label className="text-xs font-bold text-zinc-400 block mb-1">League</label>
+                    <label className="text-[10px] font-bold text-zinc-400 block mb-0.5">League</label>
                     <select
                       value={clubLeague}
                       onChange={e => {
@@ -1278,7 +1591,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         const lg = leagues.find(l => l.name === selected);
                         if (lg) setClubCountry(lg.country);
                       }}
-                      className="w-full bg-[#03150b] border border-zinc-700 rounded-xl px-3 py-2.5 text-xs font-bold text-white focus:outline-none focus:border-[#00e700]"
+                      className="w-full bg-[#03150b] border border-zinc-700 rounded-lg px-2 py-1.5 text-[11px] font-bold text-white focus:outline-none focus:border-[#00e700]"
                     >
                       {leagues.map(l => (
                         <option key={l.id} value={l.name}>
@@ -1288,21 +1601,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     </select>
                   </div>
                   <div>
-                    <label className="text-xs font-bold text-zinc-400 block mb-1">Country</label>
+                    <label className="text-[10px] font-bold text-zinc-400 block mb-0.5">Country</label>
                     <input
                       type="text"
                       required
                       value={clubCountry}
                       onChange={e => setClubCountry(e.target.value)}
-                      className="w-full bg-[#03150b] border border-zinc-700 rounded-xl px-3 py-2.5 text-xs font-bold text-white focus:outline-none focus:border-[#00e700]"
+                      className="w-full bg-[#03150b] border border-zinc-700 rounded-lg px-2.5 py-1.5 text-[11px] font-bold text-white focus:outline-none focus:border-[#00e700]"
                     />
                   </div>
                 </div>
 
-                <div className="grid grid-cols-2 gap-3 pt-1">
+                <div className="grid grid-cols-2 gap-2.5">
                   <div>
-                    <label className="text-xs font-bold text-zinc-400 block mb-1">
-                      Attack Rating ({clubAttack})
+                    <label className="text-[10px] font-bold text-zinc-400 block mb-0.5">
+                      Attack ({clubAttack})
                     </label>
                     <input
                       type="range"
@@ -1314,8 +1627,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     />
                   </div>
                   <div>
-                    <label className="text-xs font-bold text-zinc-400 block mb-1">
-                      Defense Rating ({clubDefense})
+                    <label className="text-[10px] font-bold text-zinc-400 block mb-0.5">
+                      Defense ({clubDefense})
                     </label>
                     <input
                       type="range"
@@ -1331,17 +1644,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 <button
                   type="submit"
                   disabled={isSubmitting}
-                  className="w-full h-11 rounded-xl bg-gradient-to-r from-[#00ad3a] to-[#00e700] text-black font-black text-xs sm:text-sm uppercase tracking-wider shadow-[0_0_20px_rgba(0,231,0,0.35)] hover:brightness-110 active:scale-[0.98] transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                  className="w-full h-9 rounded-lg bg-gradient-to-r from-[#00ad3a] to-[#00e700] text-black font-black text-xs uppercase tracking-wider hover:brightness-110 active:scale-[0.98] transition-all flex items-center justify-center gap-1.5 disabled:opacity-50"
                 >
-                  <PlusCircle className="w-4 h-4" />
+                  <PlusCircle className="w-3.5 h-3.5" />
                   <span>{isSubmitting ? 'Saving...' : 'Create & Deploy Club'}</span>
                 </button>
               </form>
             ) : (
-              <form onSubmit={handleBulkCreateClubs} className="space-y-3.5">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <form onSubmit={handleBulkCreateClubs} className="space-y-2.5">
+                <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <label className="text-xs font-bold text-zinc-400 block mb-1">Target League</label>
+                    <label className="text-[10px] font-bold text-zinc-400 block mb-0.5">Target League</label>
                     <select
                       value={clubLeague}
                       onChange={e => {
@@ -1350,7 +1663,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         const lg = leagues.find(l => l.name === selected);
                         if (lg) setClubCountry(lg.country);
                       }}
-                      className="w-full bg-[#03150b] border border-zinc-700 rounded-xl px-3 py-2.5 text-xs font-bold text-white focus:outline-none focus:border-[#00e700]"
+                      className="w-full bg-[#03150b] border border-zinc-700 rounded-lg px-2 py-1.5 text-[11px] font-bold text-white focus:outline-none focus:border-[#00e700]"
                     >
                       {leagues.map(l => (
                         <option key={l.id} value={l.name}>
@@ -1360,46 +1673,43 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     </select>
                   </div>
                   <div>
-                    <label className="text-xs font-bold text-zinc-400 block mb-1">Default Country</label>
+                    <label className="text-[10px] font-bold text-zinc-400 block mb-0.5">Default Country</label>
                     <input
                       type="text"
                       required
                       value={clubCountry}
                       onChange={e => setClubCountry(e.target.value)}
-                      className="w-full bg-[#03150b] border border-zinc-700 rounded-xl px-3 py-2.5 text-xs font-bold text-white focus:outline-none focus:border-[#00e700]"
+                      className="w-full bg-[#03150b] border border-zinc-700 rounded-lg px-2.5 py-1.5 text-[11px] font-bold text-white focus:outline-none focus:border-[#00e700]"
                     />
                   </div>
                 </div>
 
                 <div>
                   <div className="flex items-center justify-between mb-1">
-                    <label className="text-xs font-bold text-zinc-400">
-                      Write Club Names (one per line)
+                    <label className="text-[10px] font-bold text-zinc-400">
+                      Club Names (one per line)
                     </label>
                     <span className="text-[10px] text-[#00e700] font-bold">
                       {bulkClubsText.split('\n').filter(l => l.trim()).length} ready
                     </span>
                   </div>
                   <textarea
-                    rows={7}
+                    rows={6}
                     required
                     value={bulkClubsText}
                     onChange={e => setBulkClubsText(e.target.value)}
                     placeholder={`Leeds United\nBurnley\nSunderland\nSheffield United`}
-                    className="w-full bg-[#03150b] border border-zinc-700 rounded-xl p-3 text-xs font-bold text-white placeholder-zinc-500 focus:outline-none focus:border-[#00e700] resize-y"
+                    className="w-full bg-[#03150b] border border-zinc-700 rounded-lg p-2.5 text-[11px] font-bold text-white placeholder-zinc-500 focus:outline-none focus:border-[#00e700] resize-y"
                   />
-                  <span className="text-[10px] text-zinc-400 block mt-1">
-                    Optional format per line: Club Name | Code | League | Country
-                  </span>
                 </div>
 
                 <button
                   type="submit"
                   disabled={isSubmitting}
-                  className="w-full h-11 rounded-xl bg-gradient-to-r from-[#00ad3a] to-[#00e700] text-black font-black text-xs sm:text-sm uppercase tracking-wider shadow-[0_0_20px_rgba(0,231,0,0.35)] hover:brightness-110 active:scale-[0.98] transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                  className="w-full h-9 rounded-lg bg-gradient-to-r from-[#00ad3a] to-[#00e700] text-black font-black text-xs uppercase tracking-wider hover:brightness-110 active:scale-[0.98] transition-all flex items-center justify-center gap-1.5 disabled:opacity-50"
                 >
-                  <PlusCircle className="w-4 h-4" />
-                  <span>{isSubmitting ? 'Saving...' : 'Save & Deploy Clubs Permanently'}</span>
+                  <PlusCircle className="w-3.5 h-3.5" />
+                  <span>{isSubmitting ? 'Saving...' : 'Save & Deploy Clubs'}</span>
                 </button>
               </form>
             )}
@@ -1409,81 +1719,67 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
       {/* PAGE 3: CLUB DIRECTORY */}
       {activePage === 'club_directory' && (
-        <div className="bg-[#051c10]/95 border border-[#00e700]/25 rounded-2xl p-3 sm:p-4 space-y-3">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 border-b border-[#00e700]/15 pb-3">
-            <div className="flex items-center gap-2">
-              <List className="w-4 h-4 text-[#00e700] shrink-0" />
-              <div>
-                <h3 className="text-sm font-black text-white">All Registered Clubs ({clubs.length})</h3>
-                <span className="text-[11px] text-zinc-400">Permanent registry · ATK / DEF Power Ratings</span>
-              </div>
+        <div className="bg-[#051c10]/95 border border-[#00e700]/25 rounded-xl p-2.5 sm:p-3 space-y-2.5">
+          <div className="flex flex-wrap items-center gap-1.5 border-b border-[#00e700]/15 pb-2">
+            <select
+              value={clubLeagueFilter}
+              onChange={e => setClubLeagueFilter(e.target.value)}
+              className="bg-[#03150b] border border-zinc-700 rounded-lg px-2 h-8 text-[11px] font-bold text-white focus:outline-none focus:border-[#00e700] max-w-[140px]"
+            >
+              <option value="all">All Leagues ({leagues.length})</option>
+              {leagues.map(l => (
+                <option key={l.id} value={l.name}>
+                  {l.icon} {l.name}
+                </option>
+              ))}
+            </select>
+
+            <div className="flex items-center bg-[#03150b] border border-zinc-700 rounded-lg px-2 h-8 flex-1 min-w-[110px]">
+              <Search className="w-3 h-3 text-zinc-400 mr-1.5 shrink-0" />
+              <input
+                type="text"
+                value={clubSearch}
+                onChange={e => setClubSearch(e.target.value)}
+                placeholder="Search clubs..."
+                className="bg-transparent text-[11px] text-white placeholder-zinc-500 focus:outline-none w-full"
+              />
             </div>
 
-            <div className="flex flex-wrap items-center gap-2">
-              <select
-                value={clubLeagueFilter}
-                onChange={e => setClubLeagueFilter(e.target.value)}
-                className="bg-[#03150b] border border-zinc-700 rounded-xl px-2.5 h-9 text-xs font-bold text-white focus:outline-none focus:border-[#00e700] max-w-[180px]"
-              >
-                <option value="all">All Leagues ({leagues.length})</option>
-                {leagues.map(l => (
-                  <option key={l.id} value={l.name}>
-                    {l.icon} {l.name}
-                  </option>
-                ))}
-              </select>
-
-              <div className="flex items-center bg-[#03150b] border border-zinc-700 rounded-xl px-3 h-9 flex-1 sm:flex-initial">
-                <Search className="w-3.5 h-3.5 text-zinc-400 mr-2 shrink-0" />
-                <input
-                  type="text"
-                  value={clubSearch}
-                  onChange={e => setClubSearch(e.target.value)}
-                  placeholder="Search clubs..."
-                  className="bg-transparent text-xs text-white placeholder-zinc-500 focus:outline-none w-full sm:w-40"
-                />
-              </div>
-
-              <button
-                type="button"
-                onClick={() => handleOpenPage('create_club')}
-                className="h-9 px-3 rounded-xl bg-[#00ad3a] hover:bg-[#00c844] text-white text-xs font-black flex items-center gap-1.5 shrink-0 active:scale-95 transition-all"
-              >
-                <PlusCircle className="w-3.5 h-3.5" />
-                <span>Add Club</span>
-              </button>
-            </div>
+            <button
+              type="button"
+              onClick={() => handleOpenPage('create_club')}
+              className="h-8 px-2.5 rounded-lg bg-[#00ad3a] hover:bg-[#00c844] text-white text-[11px] font-black flex items-center gap-1 shrink-0 active:scale-95 transition-all"
+            >
+              <PlusCircle className="w-3 h-3" />
+              <span>Add</span>
+            </button>
           </div>
 
           {filteredClubs.length === 0 ? (
-            <div className="py-12 text-center space-y-2">
-              <p className="text-xs font-bold text-zinc-400">No clubs found.</p>
+            <div className="py-8 text-center">
+              <p className="text-[11px] font-bold text-zinc-400">No clubs found.</p>
             </div>
           ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 max-h-[540px] overflow-y-auto pr-1">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-h-[68vh] overflow-y-auto pr-0.5">
               {filteredClubs.map(c => (
                 <div
                   key={c.id}
-                  className="bg-[#062416] border border-[#00e700]/20 rounded-xl p-3 flex items-center justify-between gap-2.5"
+                  className="bg-[#062416] border border-[#00e700]/20 rounded-lg p-2 flex items-center justify-between gap-2"
                 >
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <span className="text-2xl shrink-0">{c.crest}</span>
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="text-lg shrink-0">{c.crest}</span>
                     <div className="min-w-0">
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-xs sm:text-sm font-black text-white truncate">{c.name}</span>
+                      <div className="flex items-center gap-1">
+                        <span className="text-xs font-black text-white truncate">{c.name}</span>
                         <span className="text-[10px] font-mono font-bold text-[#00e700]">({c.shortName})</span>
                       </div>
-                      <span className="text-[10px] text-zinc-400 truncate block mt-0.5">
-                        {c.league}
-                      </span>
-                      <div className="flex items-center gap-2 mt-1 text-[10px] font-black tabular-nums">
-                        <span className="text-[#00e700]">ATK {c.attack}</span>
-                        <span className="text-zinc-600">·</span>
-                        <span className="text-emerald-300">DEF {c.defense}</span>
+                      <div className="flex items-center gap-1.5 text-[10px] text-zinc-400 truncate">
+                        <span className="truncate">{c.league}</span>
+                        <span>·</span>
+                        <span className="text-[#00e700] font-bold tabular-nums shrink-0">ATK {c.attack}/DEF {c.defense}</span>
                       </div>
                     </div>
                   </div>
-
                   <span className="text-[10px] font-bold text-zinc-400 shrink-0">{c.country}</span>
                 </div>
               ))}
@@ -1492,38 +1788,29 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         </div>
       )}
 
-      {/* PAGE 4: LEAGUES (DEPLOYED & ACTIVE LEAGUES + TOP-RIGHT + BUTTON POP-OUT) */}
+      {/* PAGE 4: LEAGUES */}
       {activePage === 'leagues' && (
-        <div className="bg-[#051c10]/95 border border-[#00e700]/25 rounded-2xl p-3 sm:p-4 space-y-3">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 border-b border-[#00e700]/15 pb-3">
-            <div className="flex items-center gap-2">
-              <Trophy className="w-4 h-4 text-[#00e700] shrink-0" />
-              <div>
-                <h3 className="text-sm font-black text-white">Deployed &amp; Active Leagues ({leagues.length})</h3>
-                <span className="text-[11px] text-zinc-400 block">
-                  Red +: Auto-generate 5 clubs · Blue +: 3 clubs per league · Green +: Custom league
-                </span>
-              </div>
-            </div>
-
-            <div className="flex items-center bg-[#03150b] border border-zinc-700 rounded-xl px-3 h-9">
-              <Search className="w-3.5 h-3.5 text-zinc-400 mr-2 shrink-0" />
+        <div className="bg-[#051c10]/95 border border-[#00e700]/25 rounded-xl p-2.5 sm:p-3 space-y-2.5">
+          <div className="flex items-center justify-between gap-2 border-b border-[#00e700]/15 pb-2">
+            <span className="text-xs font-black text-white shrink-0">Leagues ({leagues.length})</span>
+            <div className="flex items-center bg-[#03150b] border border-zinc-700 rounded-lg px-2.5 h-8 flex-1 max-w-[220px]">
+              <Search className="w-3 h-3 text-zinc-400 mr-1.5 shrink-0" />
               <input
                 type="text"
                 value={leagueSearch}
                 onChange={e => setLeagueSearch(e.target.value)}
                 placeholder="Search leagues..."
-                className="bg-transparent text-xs text-white placeholder-zinc-500 focus:outline-none w-full sm:w-48"
+                className="bg-transparent text-[11px] text-white placeholder-zinc-500 focus:outline-none w-full"
               />
             </div>
           </div>
 
           {filteredLeagues.length === 0 ? (
-            <div className="py-12 text-center">
-              <p className="text-xs font-bold text-zinc-400">No leagues match your search.</p>
+            <div className="py-8 text-center">
+              <p className="text-[11px] font-bold text-zinc-400">No leagues match your search.</p>
             </div>
           ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 max-h-[540px] overflow-y-auto pr-1">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-h-[68vh] overflow-y-auto pr-0.5">
               {filteredLeagues.map(lg => {
                 const assignedClubs = clubs.filter(c => c.league.toLowerCase() === lg.name.toLowerCase());
                 const leagueMatchCount = matches.filter(m => m.league.toLowerCase() === lg.name.toLowerCase()).length;
@@ -1531,7 +1818,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 return (
                   <div
                     key={lg.id}
-                    className="bg-[#062416] border border-[#00e700]/20 rounded-xl p-3 space-y-2"
+                    className="bg-[#062416] border border-[#00e700]/20 rounded-lg p-2.5 space-y-1.5"
                   >
                     <button
                       type="button"
@@ -1539,38 +1826,35 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         soundManager.playClick();
                         setExpandedLeagueId(isExpanded ? null : lg.id);
                       }}
-                      className="w-full text-left flex items-center justify-between gap-3"
+                      className="w-full text-left flex items-center justify-between gap-2"
                     >
-                      <div className="flex items-center gap-3 min-w-0">
-                        <div className="w-10 h-10 rounded-xl bg-[#03150b] border border-[#00e700]/30 flex items-center justify-center text-xl shrink-0">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <div className="w-8 h-8 rounded-lg bg-[#03150b] border border-[#00e700]/30 flex items-center justify-center text-base shrink-0">
                           {lg.icon}
                         </div>
                         <div className="min-w-0">
-                          <span className="text-xs sm:text-sm font-black text-white truncate block">
-                            {lg.name}
-                          </span>
-                          <span className="text-[11px] text-zinc-400 block mt-0.5 truncate">
-                            {lg.country} · {assignedClubs.length} {assignedClubs.length === 1 ? 'Club' : 'Clubs'} · {leagueMatchCount} Active {leagueMatchCount === 1 ? 'Match' : 'Matches'}
+                          <span className="text-xs font-black text-white truncate block">{lg.name}</span>
+                          <span className="text-[10px] text-zinc-400 block truncate">
+                            {lg.country} · {assignedClubs.length} Clubs · {leagueMatchCount} Matches
                           </span>
                         </div>
                       </div>
-
-                      <span className="text-[10px] font-black uppercase tracking-wider text-[#00e700] shrink-0">
+                      <span className="text-[10px] font-black uppercase text-[#00e700] shrink-0">
                         {lg.isCustom ? 'Custom' : 'Active'}
                       </span>
                     </button>
 
                     {isExpanded && (
-                      <div className="pt-2 border-t border-[#00e700]/15 space-y-1.5">
+                      <div className="pt-1.5 border-t border-[#00e700]/15 space-y-1">
                         {assignedClubs.length === 0 ? (
-                          <span className="text-[11px] text-zinc-400 block">No clubs assigned yet.</span>
+                          <span className="text-[10px] text-zinc-400 block">No clubs assigned yet.</span>
                         ) : (
                           assignedClubs.map(c => (
                             <div
                               key={c.id}
-                              className="bg-[#03150b] border border-zinc-800 rounded-lg px-2.5 py-1.5 flex items-center justify-between gap-2 text-xs"
+                              className="bg-[#03150b] border border-zinc-800 rounded-md px-2 py-1 flex items-center justify-between gap-2 text-[11px]"
                             >
-                              <div className="flex items-center gap-2 min-w-0">
+                              <div className="flex items-center gap-1.5 min-w-0">
                                 <span>{c.crest}</span>
                                 <span className="font-bold text-white truncate">{c.name}</span>
                                 <span className="text-[10px] font-mono text-[#00e700]">({c.shortName})</span>
@@ -1593,61 +1877,56 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
       {/* PAGE 5: ACTIVE MATCHES CONTROL */}
       {activePage === 'active' && (
-        <div className="bg-[#051c10]/95 border border-[#00e700]/25 rounded-2xl p-3 sm:p-4 space-y-3">
+        <div className="bg-[#051c10]/95 border border-[#00e700]/25 rounded-xl p-2.5 sm:p-3 space-y-2.5">
           <div className="flex items-center justify-between border-b border-[#00e700]/15 pb-2">
-            <div>
-              <h3 className="text-sm font-black text-white">Live &amp; Scheduled Fixtures ({matches.length})</h3>
-              <span className="text-[11px] text-zinc-400">Control kickoff, goals, or reset matches</span>
-            </div>
-
+            <h3 className="text-xs font-black text-white">Fixtures ({matches.length})</h3>
             {matches.length > 0 && (
               <button
                 onClick={handleResetAll}
-                className="h-9 px-3 rounded-lg bg-red-900/60 hover:bg-red-800 text-red-200 text-xs font-bold border border-red-700/60 flex items-center gap-1.5 active:scale-95 transition-all"
+                className="h-7 px-2.5 rounded-md bg-red-900/60 hover:bg-red-800 text-red-200 text-[11px] font-bold border border-red-700/60 flex items-center gap-1 active:scale-95 transition-all"
               >
-                <RotateCcw className="w-3.5 h-3.5" />
+                <RotateCcw className="w-3 h-3" />
                 <span>Reset All</span>
               </button>
             )}
           </div>
 
           {matches.length === 0 ? (
-            <div className="py-10 text-center space-y-3">
-              <p className="text-sm font-black text-zinc-300">No active matches right now</p>
+            <div className="py-8 text-center space-y-2.5">
+              <p className="text-xs font-black text-zinc-300">No active matches right now</p>
               <button
                 onClick={() => handleOpenPage('fix_match')}
-                className="h-10 px-4 rounded-xl bg-gradient-to-r from-[#00ad3a] to-[#00e700] text-black font-black text-xs uppercase tracking-wider inline-flex items-center gap-1.5 active:scale-95"
+                className="h-8 px-3.5 rounded-lg bg-gradient-to-r from-[#00ad3a] to-[#00e700] text-black font-black text-[11px] uppercase tracking-wider inline-flex items-center gap-1.5 active:scale-95"
               >
-                <Swords className="w-4 h-4" />
+                <Swords className="w-3.5 h-3.5" />
                 <span>Go to Fix Match</span>
               </button>
             </div>
           ) : (
-            <div className="space-y-2">
+            <div className="space-y-1.5 max-h-[68vh] overflow-y-auto pr-0.5">
               {matches.map(m => (
                 <div
                   key={m.id}
-                  className="bg-[#062416] border border-[#00e700]/25 rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5"
+                  className="bg-[#062416] border border-[#00e700]/25 rounded-lg p-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2"
                 >
                   <div className="min-w-0">
-                    <div className="flex items-center gap-2 text-[10px] text-zinc-400 font-bold">
+                    <div className="flex items-center gap-1.5 text-[10px] text-zinc-400 font-bold">
                       <span className="truncate">{m.league}</span>
                       <span>·</span>
                       <span className={m.status === 'LIVE' ? 'text-[#00e700]' : 'text-amber-400'}>
                         {m.status === 'LIVE' ? `${m.minute}'/60' LIVE` : m.scheduledTime}
                       </span>
-                      {m.dayBucket === 'NEXT_DAY' && <span className="text-emerald-300">Next Day</span>}
-                      {m.isFeatured && <span className="text-amber-300">★ Hero</span>}
+                      {m.isFeatured && <span className="text-amber-300">★</span>}
                     </div>
-                    <div className="text-sm font-black text-white mt-0.5">
+                    <div className="text-xs font-black text-white mt-0.5 truncate">
                       {m.homeTeam} <span className="text-amber-400 font-mono mx-1">{m.homeScore} - {m.awayScore}</span> {m.awayTeam}
                     </div>
-                    <div className="text-[11px] text-[#00e700] font-bold tabular-nums mt-0.5">
+                    <div className="text-[10px] text-[#00e700] font-bold tabular-nums">
                       H&amp;O15: {m.odds.home.toFixed(2)} · X: {m.odds.draw.toFixed(2)} · A&amp;O15: {m.odds.away.toFixed(2)}
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-1.5 flex-wrap shrink-0">
+                  <div className="flex items-center gap-1.5 shrink-0">
                     {m.status === 'UPCOMING' && (
                       <button
                         onClick={async () => {
@@ -1655,7 +1934,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           await virtualEngine.kickoffMatchNow(m.id);
                           showToast(`Kicked off: ${m.homeTeam} vs ${m.awayTeam}`);
                         }}
-                        className="h-9 px-3 rounded-lg bg-[#00ad3a] hover:bg-[#00c844] text-white text-xs font-black flex items-center gap-1 active:scale-95"
+                        className="h-7 px-2.5 rounded-md bg-[#00ad3a] hover:bg-[#00c844] text-white text-[11px] font-black flex items-center gap-1 active:scale-95"
                       >
                         <Play className="w-3 h-3 fill-white" />
                         <span>Kickoff</span>
@@ -1669,7 +1948,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                             soundManager.playGoal();
                             await virtualEngine.triggerAdminGoal(m.id, 'home');
                           }}
-                          className="h-9 px-3 rounded-lg bg-[#00ad3a] hover:bg-[#00c844] text-white text-xs font-black flex items-center gap-1 active:scale-95"
+                          className="h-7 px-2 rounded-md bg-[#00ad3a] hover:bg-[#00c844] text-white text-[11px] font-black flex items-center gap-0.5 active:scale-95"
                         >
                           <Zap className="w-3 h-3" />
                           <span>+1 Home</span>
@@ -1679,7 +1958,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                             soundManager.playGoal();
                             await virtualEngine.triggerAdminGoal(m.id, 'away');
                           }}
-                          className="h-9 px-3 rounded-lg bg-[#00ad3a] hover:bg-[#00c844] text-white text-xs font-black flex items-center gap-1 active:scale-95"
+                          className="h-7 px-2 rounded-md bg-[#00ad3a] hover:bg-[#00c844] text-white text-[11px] font-black flex items-center gap-0.5 active:scale-95"
                         >
                           <Zap className="w-3 h-3" />
                           <span>+1 Away</span>
@@ -1691,12 +1970,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       onClick={async () => {
                         soundManager.playClick();
                         await virtualEngine.removeMatch(m.id);
+                        if (isCloudConnected) {
+                          void deleteCloudMatch(m.id);
+                        }
                         showToast(`Removed: ${m.homeTeam} vs ${m.awayTeam}`);
                       }}
-                      className="h-9 px-2.5 rounded-lg bg-red-950/50 hover:bg-red-900 text-red-300 border border-red-800/50"
+                      className="h-7 px-2 rounded-md bg-red-950/50 hover:bg-red-900 text-red-300 border border-red-800/50"
                       title="Remove Match"
                     >
-                      <Trash2 className="w-4 h-4" />
+                      <Trash2 className="w-3.5 h-3.5" />
                     </button>
                   </div>
                 </div>
@@ -1708,62 +1990,53 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
       {/* PAGE 6: DELETE CLUB (PERMANENT) */}
       {activePage === 'delete_club' && (
-        <div className="bg-[#051c10]/95 border border-red-500/30 rounded-2xl p-3 sm:p-4 space-y-3">
-          <div className="bg-red-950/40 border border-red-500/30 rounded-xl p-2.5 flex items-center gap-2 text-xs text-red-200 font-bold">
-            <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
-            <span>Deleting a club is permanent across all users and devices and cannot be undone.</span>
-          </div>
-
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-zinc-800 pb-3">
-            <div>
-              <h3 className="text-sm font-black text-white">Delete Club ({clubs.length})</h3>
-              <span className="text-[11px] text-zinc-400">Select any club below to permanently remove it</span>
-            </div>
-
-            <div className="flex items-center bg-[#03150b] border border-zinc-700 rounded-xl px-3 h-9">
-              <Search className="w-3.5 h-3.5 text-zinc-400 mr-2" />
+        <div className="bg-[#051c10]/95 border border-red-500/30 rounded-xl p-2.5 sm:p-3 space-y-2.5">
+          <div className="flex items-center justify-between gap-2 border-b border-zinc-800 pb-2">
+            <h3 className="text-xs font-black text-white shrink-0">Clubs ({clubs.length})</h3>
+            <div className="flex items-center bg-[#03150b] border border-zinc-700 rounded-lg px-2.5 h-8 flex-1 max-w-[220px]">
+              <Search className="w-3 h-3 text-zinc-400 mr-1.5 shrink-0" />
               <input
                 type="text"
                 value={clubSearch}
                 onChange={e => setClubSearch(e.target.value)}
                 placeholder="Search clubs..."
-                className="bg-transparent text-xs text-white placeholder-zinc-500 focus:outline-none w-full sm:w-44"
+                className="bg-transparent text-[11px] text-white placeholder-zinc-500 focus:outline-none w-full"
               />
             </div>
           </div>
 
           {filteredClubs.length === 0 ? (
-            <div className="py-10 text-center text-xs text-zinc-400">
+            <div className="py-8 text-center text-[11px] text-zinc-400">
               No clubs match your search.
             </div>
           ) : (
-            <div className="space-y-2 max-h-[460px] overflow-y-auto pr-1">
+            <div className="space-y-1.5 max-h-[68vh] overflow-y-auto pr-0.5">
               {filteredClubs.map(c => {
                 const isConfirming = pendingDeleteClubId === c.id;
                 return (
                   <div
                     key={c.id}
-                    className="bg-[#062416] border border-zinc-800 hover:border-red-500/40 rounded-xl p-2.5 sm:p-3 flex items-center justify-between gap-2 transition-colors"
+                    className="bg-[#062416] border border-zinc-800 hover:border-red-500/40 rounded-lg p-2 flex items-center justify-between gap-2 transition-colors"
                   >
-                    <div className="flex items-center gap-2.5 min-w-0">
-                      <span className="text-xl shrink-0">{c.crest}</span>
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="text-lg shrink-0">{c.crest}</span>
                       <div className="min-w-0">
-                        <div className="flex items-center gap-1.5">
-                          <span className="text-xs sm:text-sm font-black text-white truncate">{c.name}</span>
+                        <div className="flex items-center gap-1">
+                          <span className="text-xs font-black text-white truncate">{c.name}</span>
                           <span className="text-[10px] font-mono font-bold text-[#00e700]">({c.shortName})</span>
                         </div>
                         <span className="text-[10px] text-zinc-400 truncate block">
-                          {c.league} · ATK {c.attack} / DEF {c.defense}
+                          {c.league} · ATK {c.attack}/DEF {c.defense}
                         </span>
                       </div>
                     </div>
 
                     {isConfirming ? (
-                      <div className="flex items-center gap-1.5 shrink-0">
+                      <div className="flex items-center gap-1 shrink-0">
                         <button
                           type="button"
                           onClick={() => setPendingDeleteClubId(null)}
-                          className="h-9 px-3 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-bold active:scale-95 transition-all"
+                          className="h-7 px-2 rounded-md bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-[11px] font-bold active:scale-95 transition-all"
                         >
                           Cancel
                         </button>
@@ -1772,12 +2045,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           onClick={async () => {
                             soundManager.playClick();
                             await virtualEngine.deleteClub(c.id);
+                            if (isCloudConnected) {
+                              void deleteCloudClubWithTombstone(c.id);
+                            }
                             setPendingDeleteClubId(null);
                             showToast(`Permanently deleted club: ${c.name}`);
                           }}
-                          className="h-9 px-3 rounded-lg bg-red-600 hover:bg-red-500 text-white text-xs font-black flex items-center gap-1 active:scale-95 transition-all"
+                          className="h-7 px-2.5 rounded-md bg-red-600 hover:bg-red-500 text-white text-[11px] font-black flex items-center gap-1 active:scale-95 transition-all"
                         >
-                          <Trash2 className="w-3.5 h-3.5" />
+                          <Trash2 className="w-3 h-3" />
                           <span>Confirm</span>
                         </button>
                       </div>
@@ -1788,9 +2064,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           soundManager.playClick();
                           setPendingDeleteClubId(c.id);
                         }}
-                        className="h-9 px-3 rounded-lg bg-red-600/20 hover:bg-red-600 text-red-300 hover:text-white border border-red-500/40 text-xs font-black flex items-center gap-1.5 shrink-0 active:scale-95 transition-all"
+                        className="h-7 px-2.5 rounded-md bg-red-600/20 hover:bg-red-600 text-red-300 hover:text-white border border-red-500/40 text-[11px] font-black flex items-center gap-1 shrink-0 active:scale-95 transition-all"
                       >
-                        <Trash2 className="w-3.5 h-3.5" />
+                        <Trash2 className="w-3 h-3" />
                         <span>Delete</span>
                       </button>
                     )}
@@ -1802,25 +2078,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         </div>
       )}
 
-      {/* PAGE 7: ADMIN DEPOSIT PAGE (SEARCH USER BY ID -> RECIPIENT FULL NAME -> 5s VERIFY DEPOSIT) */}
+      {/* PAGE 7: ADMIN DEPOSIT PAGE */}
       {activePage === 'deposit' && (
-        <div className="max-w-xl mx-auto space-y-3">
-          <div className="bg-[#051c10]/95 border border-[#00e700]/25 rounded-2xl p-4 sm:p-5 space-y-4">
-            <div className="flex items-center justify-between border-b border-[#00e700]/15 pb-3">
-              <div className="flex items-center gap-2">
-                <Wallet className="w-4 h-4 text-[#00e700] shrink-0" />
-                <div>
-                  <h3 className="text-sm sm:text-base font-black text-white">Deposit to User Account</h3>
-                  <span className="text-[11px] text-zinc-400">
-                    Search recipient by User ID number · 5-second verification before lodging
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            <form onSubmit={handleDepositLookup} className="flex items-center gap-2">
-              <div className="flex-1 flex items-center bg-[#03150b] border border-zinc-700 focus-within:border-[#00e700] rounded-xl px-3 h-10">
-                <Search className="w-4 h-4 text-zinc-400 mr-2 shrink-0" />
+        <div className="max-w-xl mx-auto">
+          <div className="bg-[#051c10]/95 border border-[#00e700]/25 rounded-xl p-3 sm:p-4 space-y-3">
+            <form onSubmit={handleDepositLookup} className="flex items-center gap-1.5">
+              <div className="flex-1 flex items-center bg-[#03150b] border border-zinc-700 focus-within:border-[#00e700] rounded-lg px-2.5 h-9">
+                <Search className="w-3.5 h-3.5 text-zinc-400 mr-1.5 shrink-0" />
                 <input
                   type="text"
                   value={depositSearchId}
@@ -1828,62 +2092,57 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     setDepositSearchId(e.target.value);
                     if (depositError) setDepositError(null);
                   }}
-                  placeholder="Enter User ID number (e.g. 100001)"
-                  className="bg-transparent text-xs sm:text-sm font-mono font-bold text-white placeholder-zinc-500 focus:outline-none w-full tabular-nums"
+                  placeholder="Enter User ID (e.g. 100001)"
+                  className="bg-transparent text-xs font-mono font-bold text-white placeholder-zinc-500 focus:outline-none w-full tabular-nums"
                 />
               </div>
               <button
                 type="submit"
                 disabled={isSearchingUser || depositCountdown !== null}
-                className="h-10 px-4 rounded-xl bg-[#00ad3a] hover:bg-[#00c844] text-black font-black text-xs whitespace-nowrap active:scale-95 transition-all disabled:opacity-50 shrink-0"
+                className="h-9 px-3 rounded-lg bg-[#00ad3a] hover:bg-[#00c844] text-black font-black text-xs whitespace-nowrap active:scale-95 transition-all disabled:opacity-50 shrink-0"
               >
-                {isSearchingUser ? 'Searching...' : 'Search'}
+                {isSearchingUser ? '...' : 'Search'}
               </button>
             </form>
 
             {depositError && (
-              <div className="bg-red-950/80 border border-red-600/60 text-red-200 text-xs sm:text-sm font-black p-3 rounded-xl flex items-center gap-2">
+              <div className="bg-red-950/80 border border-red-600/60 text-red-200 text-xs font-black p-2.5 rounded-lg flex items-center gap-2">
                 <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
                 <span>{depositError}</span>
               </div>
             )}
 
             {depositSuccessMsg && (
-              <div className="bg-[#00ad3a]/20 border border-[#00e700]/50 text-[#00e700] text-xs font-black p-3 rounded-xl flex items-center gap-2">
+              <div className="bg-[#00ad3a]/20 border border-[#00e700]/50 text-[#00e700] text-xs font-black p-2.5 rounded-lg flex items-center gap-2">
                 <CheckCircle className="w-4 h-4 shrink-0" />
                 <span>{depositSuccessMsg}</span>
               </div>
             )}
 
             {depositRecipient && (
-              <form onSubmit={handleDepositSubmit} className="space-y-3.5 pt-1">
-                <div className="bg-[#062416] border border-[#00e700]/35 rounded-xl p-3.5 space-y-2">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400 block">
-                    Recipient
-                  </span>
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2.5 min-w-0">
-                      <span className="text-2xl shrink-0">{depositRecipient.avatar}</span>
-                      <div className="min-w-0">
-                        <span className="text-base font-black text-white block truncate">
-                          {depositRecipient.fullName}
-                        </span>
-                        <span className="text-xs text-zinc-400 font-mono tabular-nums block truncate">
-                          ID #{depositRecipient.id} · @{depositRecipient.username}
-                        </span>
-                      </div>
-                    </div>
-                    <div className="text-right shrink-0">
-                      <span className="text-[10px] text-zinc-400 font-bold block">Balance</span>
-                      <span className="text-sm font-black text-[#00e700] tabular-nums">
-                        ${depositRecipient.balance.toFixed(2)}
+              <form onSubmit={handleDepositSubmit} className="space-y-2.5">
+                <div className="bg-[#062416] border border-[#00e700]/35 rounded-lg p-2.5 flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="text-xl shrink-0">{depositRecipient.avatar}</span>
+                    <div className="min-w-0">
+                      <span className="text-xs font-black text-white block truncate">
+                        {depositRecipient.fullName}
+                      </span>
+                      <span className="text-[10px] text-zinc-400 font-mono tabular-nums block truncate">
+                        #{depositRecipient.id} · @{depositRecipient.username}
                       </span>
                     </div>
+                  </div>
+                  <div className="text-right shrink-0">
+                    <span className="text-[10px] text-zinc-400 font-bold block">Balance</span>
+                    <span className="text-xs font-black text-[#00e700] tabular-nums">
+                      ${depositRecipient.balance.toFixed(2)}
+                    </span>
                   </div>
                 </div>
 
                 <div>
-                  <label className="text-xs font-bold text-zinc-400 block mb-1">
+                  <label className="text-[10px] font-bold text-zinc-400 block mb-0.5">
                     Deposit Amount (USD)
                   </label>
                   <input
@@ -1894,30 +2153,30 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     disabled={depositCountdown !== null}
                     value={depositAmountInput}
                     onChange={e => setDepositAmountInput(e.target.value)}
-                    placeholder="Enter deposit amount (e.g. 5000)"
-                    className="w-full bg-[#03150b] border border-[#00e700]/30 rounded-xl px-3.5 py-2.5 text-sm font-black text-white placeholder-zinc-500 focus:outline-none focus:border-[#00e700] tabular-nums disabled:opacity-50"
+                    placeholder="Enter amount (e.g. 5000)"
+                    className="w-full bg-[#03150b] border border-[#00e700]/30 rounded-lg px-3 py-2 text-xs font-black text-white placeholder-zinc-500 focus:outline-none focus:border-[#00e700] tabular-nums disabled:opacity-50"
                   />
                 </div>
 
                 {depositCountdown !== null && (
-                  <div className="bg-amber-950/60 border border-amber-500/40 rounded-xl p-3 flex items-center justify-between gap-2 text-xs font-black text-amber-300">
-                    <div className="flex items-center gap-2">
-                      <Clock className="w-4 h-4 animate-spin shrink-0" />
-                      <span>Verifying user {depositRecipient.fullName} &amp; lodging deposit...</span>
+                  <div className="bg-amber-950/60 border border-amber-500/40 rounded-lg p-2 flex items-center justify-between gap-2 text-[11px] font-black text-amber-300">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <Clock className="w-3.5 h-3.5 animate-spin shrink-0" />
+                      <span className="truncate">Verifying {depositRecipient.fullName}...</span>
                     </div>
-                    <span className="font-mono text-sm tabular-nums">{depositCountdown}s</span>
+                    <span className="font-mono text-xs tabular-nums shrink-0">{depositCountdown}s</span>
                   </div>
                 )}
 
                 <button
                   type="submit"
                   disabled={depositCountdown !== null}
-                  className="w-full h-11 rounded-xl bg-gradient-to-r from-[#00ad3a] to-[#00e700] text-black font-black text-xs sm:text-sm uppercase tracking-wider shadow-[0_0_20px_rgba(0,231,0,0.35)] hover:brightness-110 active:scale-[0.98] transition-all flex items-center justify-center gap-2 disabled:opacity-60 whitespace-nowrap"
+                  className="w-full h-9 rounded-lg bg-gradient-to-r from-[#00ad3a] to-[#00e700] text-black font-black text-xs uppercase tracking-wider hover:brightness-110 active:scale-[0.98] transition-all flex items-center justify-center gap-1.5 disabled:opacity-60 whitespace-nowrap"
                 >
-                  <Wallet className="w-4 h-4" />
+                  <Wallet className="w-3.5 h-3.5" />
                   <span>
                     {depositCountdown !== null
-                      ? `Verifying User (${depositCountdown}s)...`
+                      ? `Verifying (${depositCountdown}s)...`
                       : 'Deposit'}
                   </span>
                 </button>
@@ -1929,83 +2188,64 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
       {/* PAGE 8: REGISTERED USERS DIRECTORY */}
       {activePage === 'users' && (
-        <div className="bg-[#051c10]/95 border border-[#00e700]/25 rounded-2xl p-3 sm:p-4 space-y-3">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 border-b border-[#00e700]/15 pb-3">
-            <div className="flex items-center gap-2">
-              <UserCheck className="w-4 h-4 text-[#00e700] shrink-0" />
-              <div>
-                <h3 className="text-sm font-black text-white tabular-nums">
-                  Verified Registered Users ({users.length})
-                </h3>
-                <span className="text-[11px] text-zinc-400">
-                  Automatically populated once a user registers and verifies
-                </span>
-              </div>
-            </div>
-
-            <div className="flex items-center bg-[#03150b] border border-zinc-700 rounded-xl px-3 h-9">
-              <Search className="w-3.5 h-3.5 text-zinc-400 mr-2 shrink-0" />
+        <div className="bg-[#051c10]/95 border border-[#00e700]/25 rounded-xl p-2.5 sm:p-3 space-y-2.5">
+          <div className="flex items-center justify-between gap-2 border-b border-[#00e700]/15 pb-2">
+            <span className="text-xs font-black text-white tabular-nums shrink-0">
+              Verified ({users.length})
+            </span>
+            <div className="flex items-center bg-[#03150b] border border-zinc-700 rounded-lg px-2.5 h-8 flex-1 max-w-[220px]">
+              <Search className="w-3 h-3 text-zinc-400 mr-1.5 shrink-0" />
               <input
                 type="text"
                 value={usersFilter}
                 onChange={e => setUsersFilter(e.target.value)}
                 placeholder="Filter ID, username, name..."
-                className="bg-transparent text-xs text-white placeholder-zinc-500 focus:outline-none w-full sm:w-52"
+                className="bg-transparent text-[11px] text-white placeholder-zinc-500 focus:outline-none w-full"
               />
             </div>
           </div>
 
           {filteredUsers.length === 0 ? (
-            <div className="py-12 text-center space-y-1.5">
+            <div className="py-8 text-center">
               <p className="text-xs font-bold text-zinc-300">No verified registered users yet.</p>
-              <span className="text-[11px] text-zinc-500 block">
-                Once a player completes registration &amp; verification, their profile appears here.
-              </span>
             </div>
           ) : (
-            <div className="space-y-2 max-h-[540px] overflow-y-auto pr-1">
+            <div className="space-y-1.5 max-h-[68vh] overflow-y-auto pr-0.5">
               {filteredUsers.map(u => {
                 const isConfirmingDelete = pendingDeleteUserId === u.id;
                 return (
                   <div
                     key={u.id}
-                    className="bg-[#062416] border border-[#00e700]/20 rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5"
+                    className="bg-[#062416] border border-[#00e700]/20 rounded-lg p-2.5 flex items-center justify-between gap-2"
                   >
-                    <div className="flex items-center gap-3 min-w-0">
-                      <div className="w-10 h-10 rounded-xl bg-[#03150b] border border-[#00e700]/30 flex items-center justify-center text-xl shrink-0">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <div className="w-8 h-8 rounded-lg bg-[#03150b] border border-[#00e700]/30 flex items-center justify-center text-base shrink-0">
                         {u.avatar}
                       </div>
                       <div className="min-w-0">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-sm font-black text-white truncate">@{u.username}</span>
-                          <span className="text-xs font-mono font-black text-[#00e700] tabular-nums">
+                        <div className="flex items-center gap-1 flex-wrap">
+                          <span className="text-xs font-black text-white truncate">@{u.username}</span>
+                          <span className="text-[10px] font-mono font-black text-[#00e700] tabular-nums">
                             #{u.id}
                           </span>
-                          <span className="text-xs font-bold text-zinc-300 truncate">{u.fullName}</span>
                         </div>
-                        <div className="flex items-center gap-2 text-[11px] text-zinc-400 mt-0.5 flex-wrap">
-                          <span className="truncate">{u.email}</span>
+                        <div className="flex items-center gap-1.5 text-[10px] text-zinc-400 truncate">
+                          <span className="truncate">{u.fullName}</span>
                           <span>·</span>
-                          <span className="font-mono font-bold text-[#00e700] tabular-nums">
+                          <span className="font-mono font-bold text-[#00e700] tabular-nums shrink-0">
                             ${u.balance.toFixed(2)}
                           </span>
-                          {u.phone && (
-                            <>
-                              <span>·</span>
-                              <span className="truncate">{u.phone}</span>
-                            </>
-                          )}
                         </div>
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-1.5 shrink-0">
+                    <div className="flex items-center gap-1 shrink-0">
                       {isConfirmingDelete ? (
                         <>
                           <button
                             type="button"
                             onClick={() => setPendingDeleteUserId(null)}
-                            className="h-9 px-3 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-bold whitespace-nowrap active:scale-95 transition-all"
+                            className="h-7 px-2 rounded-md bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-[11px] font-bold whitespace-nowrap active:scale-95 transition-all"
                           >
                             Cancel
                           </button>
@@ -2015,6 +2255,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                               soundManager.playClick();
                               try {
                                 const updatedList = await virtualEngine.deleteAdminUser(u.id);
+                                if (isCloudConnected) {
+                                  await deleteCloudUserWithTombstone(u.id);
+                                }
                                 setUsers(updatedList);
                                 setPendingDeleteUserId(null);
                                 showToast(`Deleted user @${u.username} (ID #${u.id})`);
@@ -2022,9 +2265,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                 showToast(err instanceof Error ? err.message : 'Unable to delete user.');
                               }
                             }}
-                            className="h-9 px-3 rounded-lg bg-red-600 hover:bg-red-500 text-white text-xs font-black flex items-center gap-1 whitespace-nowrap active:scale-95 transition-all"
+                            className="h-7 px-2 rounded-md bg-red-600 hover:bg-red-500 text-white text-[11px] font-black flex items-center gap-1 whitespace-nowrap active:scale-95 transition-all"
                           >
-                            <Trash2 className="w-3.5 h-3.5" />
+                            <Trash2 className="w-3 h-3" />
                             <span>Confirm</span>
                           </button>
                         </>
@@ -2036,9 +2279,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                               soundManager.playClick();
                               openEditUserPage(u);
                             }}
-                            className="h-9 px-3 rounded-lg bg-[#00ad3a] hover:bg-[#00c844] text-black text-xs font-black flex items-center gap-1.5 whitespace-nowrap active:scale-95 transition-all"
+                            className="h-7 px-2 rounded-md bg-[#00ad3a] hover:bg-[#00c844] text-black text-[11px] font-black flex items-center gap-1 whitespace-nowrap active:scale-95 transition-all"
                           >
-                            <Edit3 className="w-3.5 h-3.5" />
+                            <Edit3 className="w-3 h-3" />
                             <span>Update</span>
                           </button>
 
@@ -2048,9 +2291,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                               soundManager.playClick();
                               setPendingDeleteUserId(u.id);
                             }}
-                            className="h-9 px-3 rounded-lg bg-red-600/20 hover:bg-red-600 text-red-300 hover:text-white border border-red-500/40 text-xs font-black flex items-center gap-1.5 whitespace-nowrap active:scale-95 transition-all"
+                            className="h-7 px-2 rounded-md bg-red-600/20 hover:bg-red-600 text-red-300 hover:text-white border border-red-500/40 text-[11px] font-black flex items-center gap-1 whitespace-nowrap active:scale-95 transition-all"
                           >
-                            <Trash2 className="w-3.5 h-3.5" />
+                            <Trash2 className="w-3 h-3" />
                             <span>Delete</span>
                           </button>
                         </>
@@ -2064,22 +2307,22 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         </div>
       )}
 
-      {/* PAGE 9: USER INFO UPDATE FORM (PRE-FILLED REGISTRATION FIELDS + ADDITIONAL FIELDS) */}
+      {/* PAGE 9: USER INFO UPDATE FORM */}
       {activePage === 'edit_user' && selectedEditUser && (
         <div className="max-w-2xl mx-auto">
           <form
             onSubmit={handleSaveUserInfo}
-            className="bg-[#051c10]/95 border border-[#00e700]/25 rounded-2xl p-4 sm:p-5 space-y-4"
+            className="bg-[#051c10]/95 border border-[#00e700]/25 rounded-xl p-3 sm:p-4 space-y-3"
           >
-            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#00e700]/15 pb-3">
-              <div className="flex items-center gap-2.5 min-w-0">
-                <span className="text-2xl">{editForm.avatar}</span>
+            <div className="flex items-center justify-between gap-2 border-b border-[#00e700]/15 pb-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="text-xl shrink-0">{editForm.avatar}</span>
                 <div className="min-w-0">
-                  <h3 className="text-sm sm:text-base font-black text-white truncate">
+                  <h3 className="text-xs sm:text-sm font-black text-white truncate">
                     {selectedEditUser.fullName} <span className="font-mono text-[#00e700] tabular-nums">#{selectedEditUser.id}</span>
                   </h3>
-                  <span className="text-[11px] text-zinc-400 block">
-                    Balance: <span className="text-[#00e700] font-bold tabular-nums">${selectedEditUser.balance.toFixed(2)}</span> · Verified Account
+                  <span className="text-[10px] text-zinc-400 block">
+                    Balance: <span className="text-[#00e700] font-bold tabular-nums">${selectedEditUser.balance.toFixed(2)}</span>
                   </span>
                 </div>
               </div>
@@ -2094,166 +2337,152 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   setDepositSuccessMsg(null);
                   handleOpenPage('deposit');
                 }}
-                className="h-9 px-3 rounded-xl bg-[#062416] hover:bg-[#0e4425] border border-[#00e700]/40 text-xs font-black text-[#00e700] flex items-center gap-1.5 whitespace-nowrap"
+                className="h-7 px-2.5 rounded-lg bg-[#062416] hover:bg-[#0e4425] border border-[#00e700]/40 text-[11px] font-black text-[#00e700] flex items-center gap-1 whitespace-nowrap shrink-0"
               >
-                <Wallet className="w-3.5 h-3.5" />
-                <span>Deposit Funds</span>
+                <Wallet className="w-3 h-3" />
+                <span>Deposit</span>
               </button>
             </div>
 
             {formError && (
-              <div className="bg-red-950/70 border border-red-600/50 text-red-200 text-xs font-bold p-2.5 rounded-xl">
+              <div className="bg-red-950/70 border border-red-600/50 text-red-200 text-[11px] font-bold p-2 rounded-lg">
                 {formError}
               </div>
             )}
 
-            {/* Pre-filled Registration Details */}
-            <div className="space-y-3">
-              <span className="text-[11px] font-black uppercase tracking-wider text-[#00e700] block">
+            <div className="space-y-2">
+              <span className="text-[10px] font-black uppercase tracking-wider text-[#00e700] block">
                 Registration Details (Auto-Filled)
               </span>
 
-              <div>
-                <label className="text-xs font-bold text-zinc-400 block mb-1.5">Avatar</label>
-                <div className="flex flex-wrap gap-1.5 bg-[#03150b] p-2 rounded-xl border border-zinc-800">
-                  {AVATAR_OPTIONS.map(av => (
-                    <button
-                      type="button"
-                      key={av}
-                      onClick={() => {
-                        soundManager.playClick();
-                        setEditForm(prev => ({ ...prev, avatar: av }));
-                      }}
-                      className={`w-9 h-9 rounded-lg text-lg flex items-center justify-center transition-all ${
-                        editForm.avatar === av ? 'bg-[#00ad3a]/40 ring-2 ring-[#00e700] scale-105' : 'hover:bg-white/5'
-                      }`}
-                    >
-                      {av}
-                    </button>
-                  ))}
-                </div>
+              <div className="flex flex-wrap gap-1 bg-[#03150b] p-1.5 rounded-lg border border-zinc-800">
+                {AVATAR_OPTIONS.map(av => (
+                  <button
+                    type="button"
+                    key={av}
+                    onClick={() => {
+                      soundManager.playClick();
+                      setEditForm(prev => ({ ...prev, avatar: av }));
+                    }}
+                    className={`w-8 h-8 rounded-md text-base flex items-center justify-center transition-all ${
+                      editForm.avatar === av ? 'bg-[#00ad3a]/40 ring-2 ring-[#00e700]' : 'hover:bg-white/5'
+                    }`}
+                  >
+                    {av}
+                  </button>
+                ))}
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="text-xs font-bold text-zinc-400 block mb-1">User ID</label>
+                  <label className="text-[10px] font-bold text-zinc-400 block mb-0.5">User ID</label>
                   <input
                     type="text"
                     readOnly
                     value={selectedEditUser.id}
-                    className="w-full bg-[#020e07] border border-zinc-800 rounded-xl px-3 py-2 text-xs font-mono font-black text-[#00e700] tabular-nums focus:outline-none"
+                    className="w-full bg-[#020e07] border border-zinc-800 rounded-lg px-2.5 py-1.5 text-[11px] font-mono font-black text-[#00e700] tabular-nums focus:outline-none"
                   />
                 </div>
-
                 <div>
-                  <label className="text-xs font-bold text-zinc-400 block mb-1">Username</label>
+                  <label className="text-[10px] font-bold text-zinc-400 block mb-0.5">Username</label>
                   <input
                     type="text"
                     required
                     value={editForm.username}
                     onChange={e => setEditForm(prev => ({ ...prev, username: e.target.value }))}
-                    className="w-full bg-[#03150b] border border-[#00e700]/30 rounded-xl px-3 py-2 text-xs font-bold text-white focus:outline-none focus:border-[#00e700]"
+                    className="w-full bg-[#03150b] border border-[#00e700]/30 rounded-lg px-2.5 py-1.5 text-[11px] font-bold text-white focus:outline-none focus:border-[#00e700]"
                   />
                 </div>
-
                 <div>
-                  <label className="text-xs font-bold text-zinc-400 block mb-1">Full Name</label>
+                  <label className="text-[10px] font-bold text-zinc-400 block mb-0.5">Full Name</label>
                   <input
                     type="text"
                     required
                     value={editForm.fullName}
                     onChange={e => setEditForm(prev => ({ ...prev, fullName: e.target.value }))}
-                    className="w-full bg-[#03150b] border border-[#00e700]/30 rounded-xl px-3 py-2 text-xs font-bold text-white focus:outline-none focus:border-[#00e700]"
+                    className="w-full bg-[#03150b] border border-[#00e700]/30 rounded-lg px-2.5 py-1.5 text-[11px] font-bold text-white focus:outline-none focus:border-[#00e700]"
                   />
                 </div>
-
                 <div>
-                  <label className="text-xs font-bold text-zinc-400 block mb-1">Email Address</label>
+                  <label className="text-[10px] font-bold text-zinc-400 block mb-0.5">Email</label>
                   <input
                     type="email"
                     required
                     value={editForm.email}
                     onChange={e => setEditForm(prev => ({ ...prev, email: e.target.value }))}
-                    className="w-full bg-[#03150b] border border-[#00e700]/30 rounded-xl px-3 py-2 text-xs font-bold text-white focus:outline-none focus:border-[#00e700]"
+                    className="w-full bg-[#03150b] border border-[#00e700]/30 rounded-lg px-2.5 py-1.5 text-[11px] font-bold text-white focus:outline-none focus:border-[#00e700]"
                   />
                 </div>
               </div>
             </div>
 
-            {/* Additional User Info Fields */}
-            <div className="space-y-3 pt-2 border-t border-[#00e700]/15">
-              <span className="text-[11px] font-black uppercase tracking-wider text-zinc-300 block">
+            <div className="space-y-2 pt-2 border-t border-[#00e700]/15">
+              <span className="text-[10px] font-black uppercase tracking-wider text-zinc-300 block">
                 Additional Profile Information
               </span>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="text-xs font-bold text-zinc-400 block mb-1">Phone Number</label>
+                  <label className="text-[10px] font-bold text-zinc-400 block mb-0.5">Phone</label>
                   <input
                     type="text"
                     value={editForm.phone}
                     onChange={e => setEditForm(prev => ({ ...prev, phone: e.target.value }))}
-                    placeholder="Enter phone number"
-                    className="w-full bg-[#03150b] border border-zinc-700 rounded-xl px-3 py-2 text-xs font-bold text-white placeholder-zinc-600 focus:outline-none focus:border-[#00e700]"
+                    placeholder="Phone number"
+                    className="w-full bg-[#03150b] border border-zinc-700 rounded-lg px-2.5 py-1.5 text-[11px] font-bold text-white placeholder-zinc-600 focus:outline-none focus:border-[#00e700]"
                   />
                 </div>
-
                 <div>
-                  <label className="text-xs font-bold text-zinc-400 block mb-1">Country</label>
+                  <label className="text-[10px] font-bold text-zinc-400 block mb-0.5">Country</label>
                   <input
                     type="text"
                     value={editForm.country}
                     onChange={e => setEditForm(prev => ({ ...prev, country: e.target.value }))}
-                    placeholder="Enter country"
-                    className="w-full bg-[#03150b] border border-zinc-700 rounded-xl px-3 py-2 text-xs font-bold text-white placeholder-zinc-600 focus:outline-none focus:border-[#00e700]"
+                    placeholder="Country"
+                    className="w-full bg-[#03150b] border border-zinc-700 rounded-lg px-2.5 py-1.5 text-[11px] font-bold text-white placeholder-zinc-600 focus:outline-none focus:border-[#00e700]"
                   />
                 </div>
-
                 <div>
-                  <label className="text-xs font-bold text-zinc-400 block mb-1">City</label>
+                  <label className="text-[10px] font-bold text-zinc-400 block mb-0.5">City</label>
                   <input
                     type="text"
                     value={editForm.city}
                     onChange={e => setEditForm(prev => ({ ...prev, city: e.target.value }))}
-                    placeholder="Enter city"
-                    className="w-full bg-[#03150b] border border-zinc-700 rounded-xl px-3 py-2 text-xs font-bold text-white placeholder-zinc-600 focus:outline-none focus:border-[#00e700]"
+                    placeholder="City"
+                    className="w-full bg-[#03150b] border border-zinc-700 rounded-lg px-2.5 py-1.5 text-[11px] font-bold text-white placeholder-zinc-600 focus:outline-none focus:border-[#00e700]"
                   />
                 </div>
-
                 <div>
-                  <label className="text-xs font-bold text-zinc-400 block mb-1">Date of Birth</label>
+                  <label className="text-[10px] font-bold text-zinc-400 block mb-0.5">Date of Birth</label>
                   <input
                     type="date"
                     value={editForm.dateOfBirth}
                     onChange={e => setEditForm(prev => ({ ...prev, dateOfBirth: e.target.value }))}
-                    className="w-full bg-[#03150b] border border-zinc-700 rounded-xl px-3 py-2 text-xs font-bold text-white focus:outline-none focus:border-[#00e700]"
+                    className="w-full bg-[#03150b] border border-zinc-700 rounded-lg px-2 py-1.5 text-[11px] font-bold text-white focus:outline-none focus:border-[#00e700]"
                   />
                 </div>
-
-                <div className="sm:col-span-2">
-                  <label className="text-xs font-bold text-zinc-400 block mb-1">Home Address</label>
+                <div className="col-span-2">
+                  <label className="text-[10px] font-bold text-zinc-400 block mb-0.5">Home Address</label>
                   <input
                     type="text"
                     value={editForm.address}
                     onChange={e => setEditForm(prev => ({ ...prev, address: e.target.value }))}
-                    placeholder="Enter street address"
-                    className="w-full bg-[#03150b] border border-zinc-700 rounded-xl px-3 py-2 text-xs font-bold text-white placeholder-zinc-600 focus:outline-none focus:border-[#00e700]"
+                    placeholder="Street address"
+                    className="w-full bg-[#03150b] border border-zinc-700 rounded-lg px-2.5 py-1.5 text-[11px] font-bold text-white placeholder-zinc-600 focus:outline-none focus:border-[#00e700]"
                   />
                 </div>
-
                 <div>
-                  <label className="text-xs font-bold text-zinc-400 block mb-1">KYC / National ID Number</label>
+                  <label className="text-[10px] font-bold text-zinc-400 block mb-0.5">KYC / ID Number</label>
                   <input
                     type="text"
                     value={editForm.kycIdNumber}
                     onChange={e => setEditForm(prev => ({ ...prev, kycIdNumber: e.target.value }))}
-                    placeholder="Enter ID / Passport No."
-                    className="w-full bg-[#03150b] border border-zinc-700 rounded-xl px-3 py-2 text-xs font-bold text-white placeholder-zinc-600 focus:outline-none focus:border-[#00e700]"
+                    placeholder="ID / Passport No."
+                    className="w-full bg-[#03150b] border border-zinc-700 rounded-lg px-2.5 py-1.5 text-[11px] font-bold text-white placeholder-zinc-600 focus:outline-none focus:border-[#00e700]"
                   />
                 </div>
-
                 <div>
-                  <label className="text-xs font-bold text-zinc-400 block mb-1">Account Tier</label>
+                  <label className="text-[10px] font-bold text-zinc-400 block mb-0.5">Account Tier</label>
                   <select
                     value={editForm.accountTier}
                     onChange={e =>
@@ -2262,22 +2491,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         accountTier: e.target.value as 'Standard' | 'VIP' | 'Suspended'
                       }))
                     }
-                    className="w-full bg-[#03150b] border border-zinc-700 rounded-xl px-3 py-2 text-xs font-bold text-white focus:outline-none focus:border-[#00e700]"
+                    className="w-full bg-[#03150b] border border-zinc-700 rounded-lg px-2 py-1.5 text-[11px] font-bold text-white focus:outline-none focus:border-[#00e700]"
                   >
                     <option value="Standard">Standard</option>
                     <option value="VIP">VIP</option>
                     <option value="Suspended">Suspended</option>
                   </select>
                 </div>
-
-                <div className="sm:col-span-2">
-                  <label className="text-xs font-bold text-zinc-400 block mb-1">Admin Notes</label>
+                <div className="col-span-2">
+                  <label className="text-[10px] font-bold text-zinc-400 block mb-0.5">Admin Notes</label>
                   <textarea
-                    rows={3}
+                    rows={2}
                     value={editForm.notes}
                     onChange={e => setEditForm(prev => ({ ...prev, notes: e.target.value }))}
-                    placeholder="Optional notes on user profile..."
-                    className="w-full bg-[#03150b] border border-zinc-700 rounded-xl p-3 text-xs font-bold text-white placeholder-zinc-600 focus:outline-none focus:border-[#00e700] resize-y"
+                    placeholder="Optional notes..."
+                    className="w-full bg-[#03150b] border border-zinc-700 rounded-lg p-2 text-[11px] font-bold text-white placeholder-zinc-600 focus:outline-none focus:border-[#00e700] resize-y"
                   />
                 </div>
               </div>
@@ -2287,16 +2515,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <button
                 type="button"
                 onClick={() => handleOpenPage('users')}
-                className="h-11 px-4 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-bold text-xs whitespace-nowrap"
+                className="h-9 px-3 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-bold text-xs whitespace-nowrap"
               >
                 All Users
               </button>
               <button
                 type="submit"
                 disabled={isSubmitting}
-                className="flex-1 h-11 rounded-xl bg-gradient-to-r from-[#00ad3a] to-[#00e700] text-black font-black text-xs sm:text-sm uppercase tracking-wider shadow-[0_0_20px_rgba(0,231,0,0.35)] hover:brightness-110 active:scale-[0.98] transition-all flex items-center justify-center gap-2 disabled:opacity-50 whitespace-nowrap"
+                className="flex-1 h-9 rounded-lg bg-gradient-to-r from-[#00ad3a] to-[#00e700] text-black font-black text-xs uppercase tracking-wider hover:brightness-110 active:scale-[0.98] transition-all flex items-center justify-center gap-1.5 disabled:opacity-50 whitespace-nowrap"
               >
-                <Save className="w-4 h-4" />
+                <Save className="w-3.5 h-3.5" />
                 <span>{isSubmitting ? 'Saving...' : 'Save User Info'}</span>
               </button>
             </div>

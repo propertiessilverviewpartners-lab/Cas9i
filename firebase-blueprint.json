@@ -1,0 +1,399 @@
+{
+  "entities": {
+    "AdminMember": {
+      "title": "AdminMember",
+      "description": "Authorized CAS9i administrator document for role verification.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the administrator.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Verified administrator email address.",
+          "maxLength": 160
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        }
+      },
+      "required": ["uid", "email", "createdAt"]
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Permanently stored CAS9i registered user profile managed by Admin until deleted.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Sequential numeric player ID (e.g. 100001).",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "authUid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the user owner.",
+          "maxLength": 128
+        },
+        "username": {
+          "type": "string",
+          "description": "Unique display handle.",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "fullName": {
+          "type": "string",
+          "description": "Full legal name of the registered user.",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "User email address.",
+          "maxLength": 160
+        },
+        "avatar": {
+          "type": "string",
+          "description": "Avatar emoji.",
+          "minLength": 1,
+          "maxLength": 16
+        },
+        "balance": {
+          "type": "number",
+          "description": "Current USD account balance (starts at 0 until deposit)."
+        },
+        "verified": {
+          "type": "boolean",
+          "description": "Whether registration verification is complete."
+        },
+        "createdAt": {
+          "type": "number",
+          "description": "Epoch milliseconds when user registered."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of latest update."
+        },
+        "phone": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "country": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "city": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "address": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "dateOfBirth": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "kycIdNumber": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "accountTier": {
+          "type": "string",
+          "enum": ["Standard", "VIP", "Suspended"]
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "lastDepositAt": {
+          "type": "number"
+        },
+        "lastDepositAmount": {
+          "type": "number"
+        },
+        "totalBetsPlaced": {
+          "type": "number"
+        },
+        "totalWon": {
+          "type": "number"
+        },
+        "placedBetsCount": {
+          "type": "number"
+        },
+        "fxPositionsCount": {
+          "type": "number"
+        }
+      },
+      "required": ["id", "username", "fullName", "email", "avatar", "balance", "verified", "createdAt", "updatedAt"]
+    },
+    "DeletedUserTombstone": {
+      "title": "DeletedUserTombstone",
+      "description": "Permanent deletion tombstone created when Admin removes a user so stale containers cannot re-create them.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "deletedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "deletedBy": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": ["userId", "deletedAt", "deletedBy"]
+    },
+    "CounterDoc": {
+      "title": "CounterDoc",
+      "description": "Atomic sequential ID counter for newly registered users.",
+      "type": "object",
+      "properties": {
+        "nextUserNumericId": {
+          "type": "number",
+          "description": "Next sequential player ID starting at 100001."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["nextUserNumericId", "updatedAt"]
+    },
+    "ClubEntity": {
+      "title": "ClubEntity",
+      "description": "Virtual football club managed permanently by Admin.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "shortName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 10
+        },
+        "country": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "league": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "crest": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16
+        },
+        "attack": {
+          "type": "number"
+        },
+        "defense": {
+          "type": "number"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "name", "shortName", "country", "league", "crest", "attack", "defense", "updatedAt"]
+    },
+    "DeletedClubTombstone": {
+      "title": "DeletedClubTombstone",
+      "description": "Permanent deletion record when Admin deletes a club.",
+      "type": "object",
+      "properties": {
+        "clubId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "deletedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "deletedBy": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": ["clubId", "deletedAt", "deletedBy"]
+    },
+    "LeagueEntity": {
+      "title": "LeagueEntity",
+      "description": "Virtual football league persisted across devices.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "country": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "icon": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16
+        },
+        "isCustom": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "number"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "name", "country", "icon", "createdAt", "updatedAt"]
+    },
+    "MatchEntity": {
+      "title": "MatchEntity",
+      "description": "Admin-fixed virtual match persisted across devices.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "league": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "country": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "homeTeam": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "awayTeam": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "homeClubId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "awayClubId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "homeScore": {
+          "type": "number"
+        },
+        "awayScore": {
+          "type": "number"
+        },
+        "minute": {
+          "type": "number"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["UPCOMING", "LIVE", "FINISHED"]
+        },
+        "startsInSeconds": {
+          "type": "number"
+        },
+        "isFeatured": {
+          "type": "boolean"
+        },
+        "homeOdds": {
+          "type": "number"
+        },
+        "drawOdds": {
+          "type": "number"
+        },
+        "awayOdds": {
+          "type": "number"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "league", "country", "homeTeam", "awayTeam", "homeScore", "awayScore", "minute", "status", "startsInSeconds", "homeOdds", "drawOdds", "awayOdds", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/admins/{adminUid}": {
+      "schema": { "$ref": "#/entities/AdminMember" },
+      "description": "Authorized admin UIDs."
+    },
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Permanently persisted registered user profiles, isolated per owner and manageable by Admin."
+    },
+    "/deletedUsers/{userId}": {
+      "schema": { "$ref": "#/entities/DeletedUserTombstone" },
+      "description": "Tombstones for users permanently deleted by Admin."
+    },
+    "/meta/{counterId}": {
+      "schema": { "$ref": "#/entities/CounterDoc" },
+      "description": "Global counters such as sequential numeric user ID."
+    },
+    "/clubs/{clubId}": {
+      "schema": { "$ref": "#/entities/ClubEntity" },
+      "description": "Admin-managed virtual clubs synced across devices."
+    },
+    "/deletedClubs/{clubId}": {
+      "schema": { "$ref": "#/entities/DeletedClubTombstone" },
+      "description": "Tombstones for clubs permanently deleted by Admin."
+    },
+    "/leagues/{leagueId}": {
+      "schema": { "$ref": "#/entities/LeagueEntity" },
+      "description": "Admin-managed leagues synced across devices."
+    },
+    "/matches/{matchId}": {
+      "schema": { "$ref": "#/entities/MatchEntity" },
+      "description": "Admin-fixed matches synced across devices."
+    }
+  }
+}

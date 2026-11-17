@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { PlacedBet, FXPosition, FXAsset } from '../types';
-import { X, DollarSign, Clock, RotateCcw } from 'lucide-react';
+import { X, DollarSign, Clock } from 'lucide-react';
 import { soundManager } from '../services/soundEffects';
 import { formatAssetPrice } from './FXBookmakerModal';
 
@@ -11,7 +11,6 @@ interface CheckBetsModalProps {
   fxPositions?: FXPosition[];
   fxAssets?: FXAsset[];
   onCashoutBet: (betId: string, amount: number) => void;
-  onResetBets?: () => void;
 }
 
 type SettledEntry =
@@ -24,18 +23,10 @@ export const CheckBetsModal: React.FC<CheckBetsModalProps> = ({
   bets,
   fxPositions = [],
   fxAssets = [],
-  onCashoutBet,
-  onResetBets
+  onCashoutBet
 }) => {
   const [activeTab, setActiveTab] = useState<'OPEN' | 'SETTLED' | 'FX'>('OPEN');
   const [nowTick, setNowTick] = useState<number>(Date.now());
-  const [confirmReset, setConfirmReset] = useState(false);
-
-  useEffect(() => {
-    if (!isOpen) {
-      setConfirmReset(false);
-    }
-  }, [isOpen]);
 
   useEffect(() => {
     if (!isOpen || !fxPositions.some(p => p.status === 'OPEN')) return;
@@ -88,49 +79,12 @@ export const CheckBetsModal: React.FC<CheckBetsModalProps> = ({
             </div>
           </div>
 
-          <div className="flex items-center gap-1.5 shrink-0">
-            {onResetBets && (bets.length > 0 || fxPositions.length > 0) && (
-              confirmReset ? (
-                <div className="flex items-center gap-1">
-                  <button
-                    onClick={() => setConfirmReset(false)}
-                    className="px-2 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[10px] font-bold whitespace-nowrap"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={() => {
-                      soundManager.playClick();
-                      onResetBets();
-                      setConfirmReset(false);
-                    }}
-                    className="px-2 py-1 rounded-lg bg-red-600 hover:bg-red-500 text-white text-[10px] font-black whitespace-nowrap"
-                  >
-                    Confirm Reset
-                  </button>
-                </div>
-              ) : (
-                <button
-                  onClick={() => {
-                    soundManager.playClick();
-                    setConfirmReset(true);
-                  }}
-                  title="Reset Check Bets"
-                  className="px-2 py-1.5 rounded-lg bg-zinc-800/80 hover:bg-red-950/60 border border-zinc-700 hover:border-red-500/40 text-zinc-300 hover:text-red-300 text-[10px] font-bold flex items-center gap-1 whitespace-nowrap"
-                >
-                  <RotateCcw className="w-3 h-3" />
-                  <span>Reset</span>
-                </button>
-              )
-            )}
-
-            <button
-              onClick={onClose}
-              className="p-1.5 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-white"
-            >
-              <X className="w-5 h-5" />
-            </button>
-          </div>
+          <button
+            onClick={onClose}
+            className="p-1.5 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-white"
+          >
+            <X className="w-5 h-5" />
+          </button>
         </div>
 
         {/* Tab Switcher: Live (Soccer) vs Settled (Soccer + FX) vs FX Trades (Open FX) */}

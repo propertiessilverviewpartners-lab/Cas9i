@@ -224,6 +224,14 @@ export interface UserProfile {
   fullName?: string;
   phone?: string;
   country?: string;
+  city?: string;
+  address?: string;
+  dateOfBirth?: string;
+  kycIdNumber?: string;
+  accountTier?: 'Standard' | 'VIP' | 'Suspended';
+  createdAt?: number;
+  lastDepositAt?: number;
+  lastDepositAmount?: number;
   verified?: boolean;
   balance: number;
   currency: string;
@@ -253,6 +261,10 @@ export interface RegisteredUser {
   notes?: string;
   lastDepositAt?: number;
   lastDepositAmount?: number;
+  totalBetsPlaced?: number;
+  totalWon?: number;
+  placedBetsCount?: number;
+  fxPositionsCount?: number;
 }
 
 export type FXCategory = 'forex' | 'bonds' | 'shares';

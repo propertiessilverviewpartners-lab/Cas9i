@@ -17,6 +17,8 @@ import type {
   FXAsset,
   FXDuration,
   FXPricePoint,
+  FXPosition,
+  PlacedBet,
   RegisteredUser
 } from './src/types/index.ts';
 
@@ -870,11 +872,15 @@ function tickFxAssets(assets: FXAsset[], now: number): FXAsset[] {
 interface StoredUser extends RegisteredUser {
   passwordHash: string;
   verificationCode?: string;
+  placedBets?: PlacedBet[];
+  fxPositions?: FXPosition[];
 }
 
 interface PersistedStore {
   initialized: boolean;
   adminSecret: string;
+  adminBalance: number;
+  balanceCheckBetResetV3?: boolean;
   clubs: Club[];
   leagues: League[];
   matches: VirtualMatch[];
@@ -923,6 +929,10 @@ function toPublicUser(u: StoredUser): RegisteredUser {
     notes: u.notes,
     lastDepositAt: u.lastDepositAt,
     lastDepositAmount: u.lastDepositAmount,
+    totalBetsPlaced: u.totalBetsPlaced ?? 0,
+    totalWon: u.totalWon ?? 0,
+    placedBetsCount: Array.isArray(u.placedBets) ? u.placedBets.length : 0,
+    fxPositionsCount: Array.isArray(u.fxPositions) ? u.fxPositions.length : 0,
   };
 }
 
@@ -935,6 +945,8 @@ function createInitialStore(): PersistedStore {
   return {
     initialized: true,
     adminSecret: getDeterministicAdminSecret(),
+    adminBalance: 100000,
+    balanceCheckBetResetV3: true,
     clubs: buildInitialRealClubs(initialLeagues, 160),
     leagues: initialLeagues,
     matches: [],
@@ -955,14 +967,29 @@ function parseStoreFile(filePath: string): PersistedStore | null {
   const raw = fs.readFileSync(filePath, 'utf8');
   const parsed = JSON.parse(raw) as Partial<PersistedStore>;
   if (!parsed || !parsed.initialized) return null;
-  const existingUsers = Array.isArray(parsed.users) ? parsed.users : [];
+  let existingUsers = Array.isArray(parsed.users) ? parsed.users : [];
+  const needsResetV3 = !parsed.balanceCheckBetResetV3;
+  if (needsResetV3) {
+    existingUsers = existingUsers.map(u => ({
+      ...u,
+      balance: 0,
+      lastDepositAt: undefined,
+      lastDepositAmount: undefined,
+      placedBets: [],
+      fxPositions: [],
+      totalBetsPlaced: 0,
+      totalWon: 0,
+    }));
+  }
   const maxExistingNumericId = existingUsers.reduce((max, u) => {
     const n = Number(u.id);
     return !Number.isNaN(n) && n >= 100000 ? Math.max(max, n) : max;
   }, 100000);
-  return {
+  const storeObj: PersistedStore = {
     initialized: true,
     adminSecret: getDeterministicAdminSecret(),
+    adminBalance: typeof parsed.adminBalance === 'number' && Number.isFinite(parsed.adminBalance) ? parsed.adminBalance : 100000,
+    balanceCheckBetResetV3: true,
     clubs: Array.isArray(parsed.clubs) ? parsed.clubs : [],
     leagues: Array.isArray(parsed.leagues) ? parsed.leagues : JSON.parse(JSON.stringify(INITIAL_LEAGUES)),
     matches: Array.isArray(parsed.matches) ? parsed.matches : [],
@@ -979,6 +1006,10 @@ function parseStoreFile(filePath: string): PersistedStore | null {
     lastScheduleDate: typeof parsed.lastScheduleDate === 'string' ? parsed.lastScheduleDate : undefined,
     scheduleWaveVersion: typeof parsed.scheduleWaveVersion === 'number' ? parsed.scheduleWaveVersion : 1,
   };
+  if (needsResetV3) {
+    saveStore(storeObj);
+  }
+  return storeObj;
 }
 
 function loadStore(): PersistedStore {
@@ -1038,7 +1069,50 @@ const sliceVersions = {
   fx: stateVersion,
   leaderboard: stateVersion,
   ticker: stateVersion,
+  users: stateVersion,
 };
+
+let cachedFirebaseApiKey: string | null = null;
+function getFirebaseApiKey(): string {
+  if (cachedFirebaseApiKey !== null) return cachedFirebaseApiKey;
+  try {
+    const cfgPath = path.resolve(process.cwd(), 'firebase-applet-config.json');
+    if (fs.existsSync(cfgPath)) {
+      const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8')) as { apiKey?: string };
+      cachedFirebaseApiKey = typeof cfg.apiKey === 'string' ? cfg.apiKey : '';
+      return cachedFirebaseApiKey;
+    }
+  } catch {
+    // ignore missing config
+  }
+  cachedFirebaseApiKey = '';
+  return cachedFirebaseApiKey;
+}
+
+async function verifyFirebaseIdToken(idToken: string): Promise<{ uid: string; email: string; emailVerified: boolean } | null> {
+  const apiKey = getFirebaseApiKey();
+  if (!apiKey || !idToken) return null;
+  try {
+    const res = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(apiKey)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ idToken }),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as {
+      users?: Array<{ localId?: string; email?: string; emailVerified?: boolean }>;
+    };
+    const u = data.users?.[0];
+    if (!u || !u.localId || !u.email) return null;
+    return {
+      uid: u.localId,
+      email: u.email.trim().toLowerCase(),
+      emailVerified: Boolean(u.emailVerified),
+    };
+  } catch {
+    return null;
+  }
+}
 
 function createAdminToken(secret: string): string {
   return crypto.createHmac('sha256', secret).update(`${ADMIN_EMAIL}:${ADMIN_PASS}`).digest('hex');
@@ -2257,6 +2331,15 @@ async function startServer() {
       } else {
         sliceVersion = stateVersion;
       }
+    } else if (
+      type === 'event:users-changed' ||
+      type === 'event:user-updated' ||
+      type === 'event:user-deleted' ||
+      type === 'event:user-bets-reset'
+    ) {
+      stateVersion += 1;
+      sliceVersions.users += 1;
+      sliceVersion = sliceVersions.users;
     }
     const payload = JSON.stringify({
       type,
@@ -2700,11 +2783,15 @@ async function startServer() {
         fullName,
         email,
         avatar,
-        balance: 100000,
+        balance: 0,
         verified: false,
         createdAt: Date.now(),
         passwordHash: hashUserPassword(password),
         verificationCode,
+        placedBets: [],
+        fxPositions: [],
+        totalBetsPlaced: 0,
+        totalWon: 0,
       };
       store.users = [pendingUser, ...store.users];
     }
@@ -2732,7 +2819,12 @@ async function startServer() {
 
     const target = store.users[idx];
     if (target.verified) {
-      return res.json({ ok: true, user: toPublicUser(target) });
+      return res.json({
+        ok: true,
+        user: toPublicUser(target),
+        placedBets: target.placedBets || [],
+        fxPositions: target.fxPositions || [],
+      });
     }
 
     if (target.verificationCode !== code) {
@@ -2741,8 +2833,13 @@ async function startServer() {
 
     const verifiedUser: StoredUser = {
       ...target,
+      balance: 0,
       verified: true,
       verificationCode: undefined,
+      placedBets: [],
+      fxPositions: [],
+      totalBetsPlaced: 0,
+      totalWon: 0,
     };
     store.users[idx] = verifiedUser;
     saveStore(store);
@@ -2753,7 +2850,12 @@ async function startServer() {
       user: publicUser
     });
 
-    return res.json({ ok: true, user: publicUser });
+    return res.json({
+      ok: true,
+      user: publicUser,
+      placedBets: [],
+      fxPositions: [],
+    });
   });
 
   app.post('/api/auth/login', (req, res) => {
@@ -2765,7 +2867,8 @@ async function startServer() {
         return res.json({
           ok: true,
           isAdmin: true,
-          adminToken: createAdminToken(store.adminSecret)
+          adminToken: createAdminToken(store.adminSecret),
+          adminBalance: store.adminBalance ?? 100000,
         });
       }
       return res.status(401).json({ ok: false, error: 'Invalid password for admin@cas9i.com.' });
@@ -2790,7 +2893,110 @@ async function startServer() {
       return res.status(401).json({ ok: false, error: 'Invalid email or password.' });
     }
 
-    return res.json({ ok: true, isAdmin: false, user: toPublicUser(found) });
+    return res.json({
+      ok: true,
+      isAdmin: false,
+      user: toPublicUser(found),
+      placedBets: found.placedBets || [],
+      fxPositions: found.fxPositions || [],
+    });
+  });
+
+  app.post('/api/auth/google-admin', async (req, res) => {
+    const idToken = String(req.body?.idToken || '').trim();
+    if (!idToken) {
+      return res.status(400).json({ ok: false, error: 'Missing Firebase ID token.' });
+    }
+    const verified = await verifyFirebaseIdToken(idToken);
+    if (!verified || !verified.emailVerified || verified.email !== 'info.mipodi@gmail.com') {
+      return res.status(403).json({ ok: false, error: 'Google account is not authorized as CAS9i Admin.' });
+    }
+    return res.json({
+      ok: true,
+      isAdmin: true,
+      email: verified.email,
+      adminToken: createAdminToken(store.adminSecret),
+      adminBalance: store.adminBalance ?? 100000,
+    });
+  });
+
+  app.post('/api/auth/google-sync', async (req, res) => {
+    const idToken = String(req.body?.idToken || '').trim();
+    const incomingUser = req.body?.user as Partial<RegisteredUser> | undefined;
+    if (!idToken || !incomingUser?.id) {
+      return res.status(400).json({ ok: false, error: 'Missing token or user payload.' });
+    }
+    const verified = await verifyFirebaseIdToken(idToken);
+    if (!verified || !verified.emailVerified) {
+      return res.status(401).json({ ok: false, error: 'Invalid Google session token.' });
+    }
+    const cleanId = normalizeUserIdQuery(String(incomingUser.id));
+    const idx = store.users.findIndex(u => u.id === cleanId);
+    let stored: StoredUser;
+    if (idx !== -1) {
+      const existing = store.users[idx];
+      stored = {
+        ...existing,
+        username: typeof incomingUser.username === 'string' && incomingUser.username.trim() ? incomingUser.username.trim() : existing.username,
+        fullName: typeof incomingUser.fullName === 'string' && incomingUser.fullName.trim() ? incomingUser.fullName.trim() : existing.fullName,
+        email: verified.email || existing.email,
+        avatar: typeof incomingUser.avatar === 'string' && incomingUser.avatar.trim() ? incomingUser.avatar.trim() : existing.avatar,
+        balance: typeof incomingUser.balance === 'number' && Number.isFinite(incomingUser.balance) ? incomingUser.balance : existing.balance,
+        phone: typeof incomingUser.phone === 'string' ? incomingUser.phone : existing.phone,
+        country: typeof incomingUser.country === 'string' ? incomingUser.country : existing.country,
+        city: typeof incomingUser.city === 'string' ? incomingUser.city : existing.city,
+        address: typeof incomingUser.address === 'string' ? incomingUser.address : existing.address,
+        dateOfBirth: typeof incomingUser.dateOfBirth === 'string' ? incomingUser.dateOfBirth : existing.dateOfBirth,
+        kycIdNumber: typeof incomingUser.kycIdNumber === 'string' ? incomingUser.kycIdNumber : existing.kycIdNumber,
+        accountTier: incomingUser.accountTier ?? existing.accountTier ?? 'Standard',
+        notes: typeof incomingUser.notes === 'string' ? incomingUser.notes : existing.notes,
+        verified: true,
+      };
+      store.users[idx] = stored;
+    } else {
+      stored = {
+        id: cleanId,
+        username: String(incomingUser.username || verified.email.split('@')[0] || 'Player').trim(),
+        fullName: String(incomingUser.fullName || incomingUser.username || 'Player').trim(),
+        email: verified.email,
+        avatar: String(incomingUser.avatar || '🦁').trim() || '🦁',
+        balance: typeof incomingUser.balance === 'number' && Number.isFinite(incomingUser.balance) ? incomingUser.balance : 0,
+        verified: true,
+        createdAt: typeof incomingUser.createdAt === 'number' && incomingUser.createdAt > 0 ? incomingUser.createdAt : Date.now(),
+        passwordHash: '',
+        phone: typeof incomingUser.phone === 'string' ? incomingUser.phone : undefined,
+        country: typeof incomingUser.country === 'string' ? incomingUser.country : undefined,
+        city: typeof incomingUser.city === 'string' ? incomingUser.city : undefined,
+        address: typeof incomingUser.address === 'string' ? incomingUser.address : undefined,
+        dateOfBirth: typeof incomingUser.dateOfBirth === 'string' ? incomingUser.dateOfBirth : undefined,
+        kycIdNumber: typeof incomingUser.kycIdNumber === 'string' ? incomingUser.kycIdNumber : undefined,
+        accountTier: incomingUser.accountTier ?? 'Standard',
+        notes: typeof incomingUser.notes === 'string' ? incomingUser.notes : undefined,
+        lastDepositAt: typeof incomingUser.lastDepositAt === 'number' ? incomingUser.lastDepositAt : undefined,
+        lastDepositAmount: typeof incomingUser.lastDepositAmount === 'number' ? incomingUser.lastDepositAmount : undefined,
+        totalBetsPlaced: typeof incomingUser.totalBetsPlaced === 'number' ? incomingUser.totalBetsPlaced : 0,
+        totalWon: typeof incomingUser.totalWon === 'number' ? incomingUser.totalWon : 0,
+        placedBets: [],
+        fxPositions: [],
+      };
+      store.users = [stored, ...store.users];
+      const numericId = Number(cleanId);
+      if (!Number.isNaN(numericId) && numericId >= (store.nextUserNumericId || 100001)) {
+        store.nextUserNumericId = numericId + 1;
+      }
+    }
+    saveStore(store);
+    const publicUser = toPublicUser(stored);
+    broadcast('event:users-changed', {
+      count: store.users.filter(u => u.verified).length,
+      user: publicUser,
+    });
+    return res.json({
+      ok: true,
+      user: publicUser,
+      placedBets: stored.placedBets || [],
+      fxPositions: stored.fxPositions || [],
+    });
   });
 
   app.get('/api/auth/session/:id', (req, res) => {
@@ -2799,7 +3005,12 @@ async function startServer() {
     if (!found) {
       return res.status(404).json({ ok: false, error: 'User not found.' });
     }
-    return res.json({ ok: true, user: toPublicUser(found) });
+    return res.json({
+      ok: true,
+      user: toPublicUser(found),
+      placedBets: found.placedBets || [],
+      fxPositions: found.fxPositions || [],
+    });
   });
 
   app.post('/api/auth/session/:id/balance', (req, res) => {
@@ -2821,6 +3032,111 @@ async function startServer() {
     const publicUser = toPublicUser(store.users[idx]);
     broadcast('event:users-changed', { count: store.users.filter(u => u.verified).length, user: publicUser });
     return res.json({ ok: true, user: publicUser });
+  });
+
+  // Persist user's own profile updates (strictly scoped to :id)
+  app.put('/api/auth/session/:id/profile', (req, res) => {
+    const cleanId = normalizeUserIdQuery(req.params.id || '');
+    const idx = store.users.findIndex(u => u.id === cleanId && u.verified);
+    if (idx === -1) {
+      return res.status(404).json({ ok: false, error: 'User not found.' });
+    }
+    const current = store.users[idx];
+    const body = req.body || {};
+    const nextUsername = typeof body.username === 'string' && body.username.trim() ? body.username.trim() : current.username;
+    const duplicateUsername = store.users.some(
+      u => u.id !== current.id && u.verified && u.username.toLowerCase() === nextUsername.toLowerCase()
+    );
+    if (duplicateUsername) {
+      return res.status(409).json({ ok: false, error: 'This username is already taken.' });
+    }
+
+    const updatedUser: StoredUser = {
+      ...current,
+      username: nextUsername,
+      fullName: typeof body.fullName === 'string' && body.fullName.trim() ? body.fullName.trim() : current.fullName,
+      avatar: typeof body.avatar === 'string' && body.avatar.trim() ? body.avatar.trim() : current.avatar,
+      phone: typeof body.phone === 'string' ? body.phone.trim() : current.phone,
+      country: typeof body.country === 'string' ? body.country.trim() : current.country,
+      city: typeof body.city === 'string' ? body.city.trim() : current.city,
+      address: typeof body.address === 'string' ? body.address.trim() : current.address,
+      dateOfBirth: typeof body.dateOfBirth === 'string' ? body.dateOfBirth.trim() : current.dateOfBirth,
+    };
+    store.users[idx] = updatedUser;
+    saveStore(store);
+
+    const publicUser = toPublicUser(updatedUser);
+    broadcast('event:user-updated', publicUser);
+    broadcast('event:users-changed', { count: store.users.filter(u => u.verified).length });
+    return res.json({ ok: true, user: publicUser });
+  });
+
+  // Persist user's own isolated bets and FX positions
+  app.put('/api/auth/session/:id/bets', (req, res) => {
+    const cleanId = normalizeUserIdQuery(req.params.id || '');
+    const idx = store.users.findIndex(u => u.id === cleanId && u.verified);
+    if (idx === -1) {
+      return res.status(404).json({ ok: false, error: 'User not found.' });
+    }
+    const current = store.users[idx];
+    const placedBets = Array.isArray(req.body?.placedBets) ? (req.body.placedBets as PlacedBet[]).slice(0, 200) : current.placedBets || [];
+    const fxPositions = Array.isArray(req.body?.fxPositions) ? (req.body.fxPositions as FXPosition[]).slice(0, 200) : current.fxPositions || [];
+    const totalBetsPlaced = typeof req.body?.totalBetsPlaced === 'number' && Number.isFinite(req.body.totalBetsPlaced)
+      ? Math.max(0, req.body.totalBetsPlaced)
+      : current.totalBetsPlaced ?? 0;
+    const totalWon = typeof req.body?.totalWon === 'number' && Number.isFinite(req.body.totalWon)
+      ? Math.max(0, req.body.totalWon)
+      : current.totalWon ?? 0;
+
+    store.users[idx] = {
+      ...current,
+      placedBets,
+      fxPositions,
+      totalBetsPlaced,
+      totalWon,
+    };
+    saveStore(store);
+    return res.json({ ok: true });
+  });
+
+  // Admin: Reset a single user's Check Bets
+  app.post('/api/admin/users/:id/reset-bets', (req, res) => {
+    if (!isValidAdminRequest(req)) {
+      return res.status(403).json({ error: 'Admin authorization required.' });
+    }
+    const cleanId = normalizeUserIdQuery(req.params.id || '');
+    const idx = store.users.findIndex(u => u.id === cleanId);
+    if (idx === -1) {
+      return res.status(404).json({ ok: false, error: 'User not found.' });
+    }
+    store.users[idx] = {
+      ...store.users[idx],
+      placedBets: [],
+      fxPositions: [],
+      totalBetsPlaced: 0,
+      totalWon: 0,
+    };
+    saveStore(store);
+    const publicUser = toPublicUser(store.users[idx]);
+    const verifiedUsers = store.users.filter(u => u.verified).sort((a, b) => b.createdAt - a.createdAt).map(toPublicUser);
+    broadcast('event:user-bets-reset', { userId: cleanId });
+    broadcast('event:user-updated', publicUser);
+    broadcast('event:users-changed', { count: verifiedUsers.length });
+    return res.json({ ok: true, user: publicUser, users: verifiedUsers });
+  });
+
+  // Admin: Update admin balance separately from user balances
+  app.post('/api/auth/admin/balance', (req, res) => {
+    if (!isValidAdminRequest(req)) {
+      return res.status(403).json({ error: 'Admin authorization required.' });
+    }
+    const delta = Number(req.body?.delta);
+    if (!Number.isFinite(delta)) {
+      return res.status(400).json({ ok: false, error: 'Invalid balance delta.' });
+    }
+    store.adminBalance = Math.max(0, Math.round(((store.adminBalance ?? 100000) + delta) * 100) / 100);
+    saveStore(store);
+    return res.json({ ok: true, adminBalance: store.adminBalance });
   });
 
   // Admin: List Verified Registered Users
@@ -2951,6 +3267,276 @@ async function startServer() {
     broadcast('event:users-changed', { count: verifiedUsers.length });
 
     return res.json({ ok: true, user: publicUser, users: verifiedUsers, depositedAmount: amount });
+  });
+
+  // Admin: Reconcile authoritative Firestore cloud state into container store (never resurrects deleted items)
+  app.post('/api/admin/cloud-sync', (req, res) => {
+    if (!isValidAdminRequest(req)) {
+      return res.status(403).json({ error: 'Admin authorization required.' });
+    }
+    const cloudUsers = Array.isArray(req.body?.users) ? (req.body.users as RegisteredUser[]) : [];
+    const deletedUserIds = new Set<string>(
+      Array.isArray(req.body?.deletedUserIds) ? req.body.deletedUserIds.map((id: unknown) => normalizeUserIdQuery(String(id))) : []
+    );
+    const cloudClubs = Array.isArray(req.body?.clubs) ? (req.body.clubs as Club[]) : [];
+    const deletedClubIds = new Set<string>(
+      Array.isArray(req.body?.deletedClubIds) ? req.body.deletedClubIds.map((id: unknown) => String(id).trim()) : []
+    );
+    const cloudLeagues = Array.isArray(req.body?.leagues) ? (req.body.leagues as League[]) : [];
+    const cloudMatches = Array.isArray(req.body?.matches)
+      ? (req.body.matches as Array<{
+          id: string;
+          league: string;
+          country: string;
+          homeTeam: string;
+          awayTeam: string;
+          homeScore: number;
+          awayScore: number;
+          minute: number;
+          status: 'UPCOMING' | 'LIVE' | 'FINISHED';
+          startsInSeconds: number;
+          isFeatured?: boolean;
+          homeOdds: number;
+          drawOdds: number;
+          awayOdds: number;
+        }>)
+      : [];
+
+    let usersChanged = false;
+    let clubsChanged = false;
+    let leaguesChanged = false;
+    let matchesChanged = false;
+    const removedUserIds: string[] = [];
+    const updatedUserPayloads: RegisteredUser[] = [];
+
+    if (deletedUserIds.size > 0) {
+      const remainingUsers: StoredUser[] = [];
+      for (const u of store.users) {
+        if (deletedUserIds.has(u.id)) {
+          removedUserIds.push(u.id);
+          usersChanged = true;
+        } else {
+          remainingUsers.push(u);
+        }
+      }
+      store.users = remainingUsers;
+    }
+
+    for (const cu of cloudUsers) {
+      const cleanId = normalizeUserIdQuery(String(cu.id || ''));
+      if (!cleanId || deletedUserIds.has(cleanId)) continue;
+      const numId = Number(cleanId);
+      if (!Number.isNaN(numId) && numId >= (store.nextUserNumericId || 100001)) {
+        store.nextUserNumericId = numId + 1;
+      }
+      const idx = store.users.findIndex(u => u.id === cleanId);
+      if (idx === -1) {
+        const createdStored: StoredUser = {
+          id: cleanId,
+          username: cu.username,
+          fullName: cu.fullName,
+          email: cu.email,
+          avatar: cu.avatar || '🦁',
+          balance: typeof cu.balance === 'number' && Number.isFinite(cu.balance) ? cu.balance : 0,
+          verified: Boolean(cu.verified),
+          createdAt: typeof cu.createdAt === 'number' && cu.createdAt > 0 ? cu.createdAt : Date.now(),
+          passwordHash: '',
+          phone: cu.phone,
+          country: cu.country,
+          city: cu.city,
+          address: cu.address,
+          dateOfBirth: cu.dateOfBirth,
+          kycIdNumber: cu.kycIdNumber,
+          accountTier: cu.accountTier || 'Standard',
+          notes: cu.notes,
+          lastDepositAt: cu.lastDepositAt,
+          lastDepositAmount: cu.lastDepositAmount,
+          totalBetsPlaced: cu.totalBetsPlaced ?? 0,
+          totalWon: cu.totalWon ?? 0,
+          placedBets: [],
+          fxPositions: [],
+        };
+        store.users = [createdStored, ...store.users];
+        usersChanged = true;
+      } else {
+        const cur = store.users[idx];
+        const differs =
+          cur.username !== cu.username ||
+          cur.fullName !== cu.fullName ||
+          cur.email !== cu.email ||
+          cur.avatar !== cu.avatar ||
+          Math.abs((cur.balance ?? 0) - (cu.balance ?? 0)) > 0.001 ||
+          (cur.phone ?? '') !== (cu.phone ?? '') ||
+          (cur.country ?? '') !== (cu.country ?? '') ||
+          (cur.city ?? '') !== (cu.city ?? '') ||
+          (cur.address ?? '') !== (cu.address ?? '') ||
+          (cur.dateOfBirth ?? '') !== (cu.dateOfBirth ?? '') ||
+          (cur.kycIdNumber ?? '') !== (cu.kycIdNumber ?? '') ||
+          (cur.accountTier ?? 'Standard') !== (cu.accountTier ?? 'Standard') ||
+          (cur.notes ?? '') !== (cu.notes ?? '') ||
+          cur.lastDepositAt !== cu.lastDepositAt ||
+          cur.lastDepositAmount !== cu.lastDepositAmount ||
+          cur.verified !== Boolean(cu.verified);
+
+        if (differs) {
+          const merged: StoredUser = {
+            ...cur,
+            username: cu.username,
+            fullName: cu.fullName,
+            email: cu.email,
+            avatar: cu.avatar || cur.avatar,
+            balance: typeof cu.balance === 'number' && Number.isFinite(cu.balance) ? cu.balance : cur.balance,
+            verified: Boolean(cu.verified),
+            phone: cu.phone ?? cur.phone,
+            country: cu.country ?? cur.country,
+            city: cu.city ?? cur.city,
+            address: cu.address ?? cur.address,
+            dateOfBirth: cu.dateOfBirth ?? cur.dateOfBirth,
+            kycIdNumber: cu.kycIdNumber ?? cur.kycIdNumber,
+            accountTier: cu.accountTier ?? cur.accountTier ?? 'Standard',
+            notes: cu.notes ?? cur.notes,
+            lastDepositAt: cu.lastDepositAt ?? cur.lastDepositAt,
+            lastDepositAmount: cu.lastDepositAmount ?? cur.lastDepositAmount,
+          };
+          store.users[idx] = merged;
+          usersChanged = true;
+          updatedUserPayloads.push(toPublicUser(merged));
+        }
+      }
+    }
+
+    if (deletedClubIds.size > 0) {
+      const beforeClubs = store.clubs.length;
+      store.clubs = store.clubs.filter(c => !deletedClubIds.has(c.id));
+      if (store.clubs.length !== beforeClubs) {
+        clubsChanged = true;
+      }
+    }
+
+    for (const cc of cloudClubs) {
+      if (!cc?.id || deletedClubIds.has(cc.id)) continue;
+      const existingIdx = store.clubs.findIndex(c => c.id === cc.id);
+      if (existingIdx === -1) {
+        store.clubs = [cc, ...store.clubs];
+        clubsChanged = true;
+      } else {
+        const ex = store.clubs[existingIdx];
+        if (
+          ex.name !== cc.name ||
+          ex.shortName !== cc.shortName ||
+          ex.league !== cc.league ||
+          ex.attack !== cc.attack ||
+          ex.defense !== cc.defense
+        ) {
+          store.clubs[existingIdx] = cc;
+          clubsChanged = true;
+        }
+      }
+    }
+
+    for (const cl of cloudLeagues) {
+      if (!cl?.id || !cl?.name) continue;
+      const exists = store.leagues.some(
+        l => l.id === cl.id || l.name.toLowerCase() === cl.name.toLowerCase()
+      );
+      if (!exists) {
+        store.leagues = [cl, ...store.leagues];
+        leaguesChanged = true;
+      }
+    }
+
+    const now = Date.now();
+    for (const cm of cloudMatches) {
+      if (!cm?.id || cm.status === 'FINISHED') continue;
+      const exists = store.matches.some(m => m.id === cm.id);
+      if (!exists) {
+        const homeClub = store.clubs.find(c => c.name.toLowerCase() === cm.homeTeam.toLowerCase());
+        const awayClub = store.clubs.find(c => c.name.toLowerCase() === cm.awayTeam.toLowerCase());
+        const hAtk = homeClub?.attack ?? 80;
+        const hDef = homeClub?.defense ?? 78;
+        const aAtk = awayClub?.attack ?? 79;
+        const aDef = awayClub?.defense ?? 77;
+        const startSec = Math.max(10, Number(cm.startsInSeconds) || 180);
+        const isLive = cm.status === 'LIVE';
+        const hydratedMatch: VirtualMatch = {
+          id: cm.id,
+          league: cm.league,
+          country: cm.country,
+          homeTeam: cm.homeTeam,
+          awayTeam: cm.awayTeam,
+          homeScore: cm.homeScore || 0,
+          awayScore: cm.awayScore || 0,
+          firstHalfHomeScore: 0,
+          firstHalfAwayScore: 0,
+          minute: isLive ? Math.max(1, cm.minute || 1) : 0,
+          durationMinutes: MATCH_DURATION_MINUTES,
+          status: isLive ? 'LIVE' : 'UPCOMING',
+          scheduledTime: isLive ? 'Live Now' : `Starts in ${Math.max(1, Math.round(startSec / 60))}m`,
+          startsInSeconds: isLive ? 0 : startSec,
+          kickoffAt: isLive ? now - Math.max(0, (cm.minute || 1) - 1) * 60000 : now + startSec * 1000,
+          dayBucket: 'TODAY',
+          matchDate: getDayKey(0),
+          isSystemDaily: false,
+          isFeatured: Boolean(cm.isFeatured),
+          odds: buildHighGoalOdds(hAtk, hDef, aAtk, aDef, {
+            home: cm.homeOdds,
+            draw: cm.drawOdds,
+            away: cm.awayOdds,
+          }),
+          oddsDirection: {},
+          stats: {
+            possessionHome: 50,
+            possessionAway: 50,
+            dangerousAttacksHome: 0,
+            dangerousAttacksAway: 0,
+            shotsOnTargetHome: 0,
+            shotsOnTargetAway: 0,
+            cornersHome: 0,
+            cornersAway: 0,
+          },
+          events: [
+            {
+              minute: isLive ? Math.max(1, cm.minute || 1) : 0,
+              text: `Cloud synced fixture: ${cm.homeTeam} vs ${cm.awayTeam}.`,
+              type: 'whistle',
+            },
+          ],
+        };
+        store.matches = [hydratedMatch, ...store.matches];
+        matchesChanged = true;
+      }
+    }
+
+    if (usersChanged || clubsChanged || leaguesChanged || matchesChanged) {
+      saveStore(store);
+    }
+
+    const verifiedUsers = store.users
+      .filter(u => u.verified)
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .map(toPublicUser);
+
+    if (clubsChanged) broadcast('state:clubs', store.clubs);
+    if (leaguesChanged) broadcast('state:leagues', store.leagues);
+    if (matchesChanged) broadcast('state:matches', store.matches);
+    for (const delId of removedUserIds) {
+      broadcast('event:user-deleted', { userId: delId });
+    }
+    for (const updUser of updatedUserPayloads) {
+      broadcast('event:user-updated', updUser);
+    }
+    if (usersChanged) {
+      broadcast('event:users-changed', { count: verifiedUsers.length });
+    }
+
+    return res.json({
+      ok: true,
+      users: verifiedUsers,
+      clubs: store.clubs,
+      leagues: store.leagues,
+      matches: store.matches,
+      versions: sliceVersions,
+    });
   });
 
   // Admin: Create Permanent Club

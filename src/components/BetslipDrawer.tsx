@@ -99,7 +99,7 @@ export const BetslipDrawer: React.FC<BetslipDrawerProps> = ({
       return;
     }
     if (user.balance < totalRequiredStake) {
-      setErrorMsg('Insufficient balance. Please top-up.');
+      setErrorMsg('Insufficient balance. Contact Admin to deposit funds.');
       return;
     }
 

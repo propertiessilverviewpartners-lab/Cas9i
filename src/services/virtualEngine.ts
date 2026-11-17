@@ -1,4 +1,4 @@
-import { VirtualMatch, LeaderboardEntry, LiveBetTickerItem, PlacedBet, Club, League, TipsterBetcode, H2HRecord, BetSelection, FXAsset, RegisteredUser } from '../types';
+import { VirtualMatch, LeaderboardEntry, LiveBetTickerItem, PlacedBet, Club, League, TipsterBetcode, H2HRecord, BetSelection, FXAsset, FXPosition, RegisteredUser } from '../types';
 
 export const PRESET_FIXTURES_INFO = {
   featuredTitle: 'CDA Navalcarnero vs Real Betis',
@@ -28,6 +28,7 @@ class VirtualEngineService {
   private usersChangedSubscribers: Array<() => void> = [];
   private userUpdatedSubscribers: Array<(user: RegisteredUser) => void> = [];
   private userDeletedSubscribers: Array<(userId: string) => void> = [];
+  private userBetsResetSubscribers: Array<(userId: string) => void> = [];
 
   private ws: WebSocket | null = null;
   private reconnectAttempts = 0;
@@ -44,6 +45,7 @@ class VirtualEngineService {
     fx: 0,
     leaderboard: 0,
     ticker: 0,
+    users: 0,
   };
 
   constructor() {
@@ -106,7 +108,10 @@ class VirtualEngineService {
   public async login(email: string, password: string): Promise<{
     ok: boolean;
     isAdmin?: boolean;
+    adminBalance?: number;
     user?: RegisteredUser;
+    placedBets?: PlacedBet[];
+    fxPositions?: FXPosition[];
     needsVerification?: boolean;
     error?: string;
   }> {
@@ -131,7 +136,61 @@ class VirtualEngineService {
     return {
       ok: true,
       isAdmin: Boolean(data.isAdmin),
-      user: data.user as RegisteredUser | undefined
+      adminBalance: typeof data.adminBalance === 'number' ? data.adminBalance : undefined,
+      user: data.user as RegisteredUser | undefined,
+      placedBets: Array.isArray(data.placedBets) ? (data.placedBets as PlacedBet[]) : undefined,
+      fxPositions: Array.isArray(data.fxPositions) ? (data.fxPositions as FXPosition[]) : undefined,
+    };
+  }
+
+  public async loginWithGoogleAdmin(idToken: string): Promise<{
+    ok: boolean;
+    isAdmin?: boolean;
+    adminBalance?: number;
+    email?: string;
+    error?: string;
+  }> {
+    const res = await fetch('/api/auth/google-admin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ idToken }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      return { ok: false, error: data.error || 'Google Admin authentication failed.' };
+    }
+    if (data.adminToken) {
+      this.setAdminToken(data.adminToken);
+    }
+    return {
+      ok: true,
+      isAdmin: true,
+      adminBalance: typeof data.adminBalance === 'number' ? data.adminBalance : 100000,
+      email: typeof data.email === 'string' ? data.email : undefined,
+    };
+  }
+
+  public async syncGoogleUserSession(idToken: string, user: RegisteredUser): Promise<{
+    ok: boolean;
+    user?: RegisteredUser;
+    placedBets?: PlacedBet[];
+    fxPositions?: FXPosition[];
+    error?: string;
+  }> {
+    const res = await fetch('/api/auth/google-sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ idToken, user }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      return { ok: false, error: data.error || 'Unable to sync Google session.' };
+    }
+    return {
+      ok: true,
+      user: data.user as RegisteredUser,
+      placedBets: Array.isArray(data.placedBets) ? (data.placedBets as PlacedBet[]) : [],
+      fxPositions: Array.isArray(data.fxPositions) ? (data.fxPositions as FXPosition[]) : [],
     };
   }
 
@@ -159,7 +218,13 @@ class VirtualEngineService {
     };
   }
 
-  public async verifyRegistration(email: string, code: string): Promise<{ ok: boolean; user?: RegisteredUser; error?: string }> {
+  public async verifyRegistration(email: string, code: string): Promise<{
+    ok: boolean;
+    user?: RegisteredUser;
+    placedBets?: PlacedBet[];
+    fxPositions?: FXPosition[];
+    error?: string;
+  }> {
     const res = await fetch('/api/auth/register/verify', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -169,22 +234,81 @@ class VirtualEngineService {
     if (!res.ok || !data.ok) {
       return { ok: false, error: data.error || 'Verification failed.' };
     }
-    return { ok: true, user: data.user as RegisteredUser };
+    return {
+      ok: true,
+      user: data.user as RegisteredUser,
+      placedBets: Array.isArray(data.placedBets) ? (data.placedBets as PlacedBet[]) : [],
+      fxPositions: Array.isArray(data.fxPositions) ? (data.fxPositions as FXPosition[]) : [],
+    };
   }
 
-  public async fetchUserSession(userId: string): Promise<RegisteredUser | null> {
+  public async fetchUserSession(userId: string): Promise<{
+    user: RegisteredUser;
+    placedBets: PlacedBet[];
+    fxPositions: FXPosition[];
+  } | null> {
     try {
       const res = await fetch(`/api/auth/session/${encodeURIComponent(userId)}`, { cache: 'no-store' });
       if (!res.ok) return null;
       const data = await res.json();
-      return data.ok ? (data.user as RegisteredUser) : null;
+      if (!data.ok || !data.user) return null;
+      return {
+        user: data.user as RegisteredUser,
+        placedBets: Array.isArray(data.placedBets) ? (data.placedBets as PlacedBet[]) : [],
+        fxPositions: Array.isArray(data.fxPositions) ? (data.fxPositions as FXPosition[]) : [],
+      };
     } catch {
       return null;
     }
   }
 
+  public async updateOwnProfile(
+    userId: string,
+    updates: Partial<Pick<RegisteredUser, 'username' | 'fullName' | 'avatar' | 'phone' | 'country' | 'city' | 'address' | 'dateOfBirth'>>
+  ): Promise<RegisteredUser> {
+    const res = await fetch(`/api/auth/session/${encodeURIComponent(userId)}/profile`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updates)
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok || !data.user) {
+      throw new Error(data.error || 'Unable to update profile.');
+    }
+    return data.user as RegisteredUser;
+  }
+
+  public syncUserBets(
+    userId: string,
+    payload: { placedBets: PlacedBet[]; fxPositions: FXPosition[]; totalBetsPlaced: number; totalWon: number }
+  ) {
+    if (!userId || userId === 'guest' || userId === 'admin-cas9i') return;
+    void fetch(`/api/auth/session/${encodeURIComponent(userId)}/bets`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    }).catch(() => {
+      // ignore transient network errors
+    });
+  }
+
+  public syncAdminBalanceDelta(delta: number) {
+    if (!this.adminToken || !Number.isFinite(delta) || delta === 0) return;
+    void fetch('/api/auth/admin/balance', {
+      method: 'POST',
+      headers: this.getAdminHeaders(),
+      body: JSON.stringify({ delta })
+    }).catch(() => {
+      // ignore transient network errors
+    });
+  }
+
   public syncUserBalanceDelta(userId: string, delta: number) {
-    if (!userId || userId === 'guest' || userId === 'admin-cas9i' || !Number.isFinite(delta) || delta === 0) return;
+    if (!userId || userId === 'guest' || !Number.isFinite(delta) || delta === 0) return;
+    if (userId === 'admin-cas9i') {
+      this.syncAdminBalanceDelta(delta);
+      return;
+    }
     void fetch(`/api/auth/session/${encodeURIComponent(userId)}/balance`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -274,6 +398,11 @@ class VirtualEngineService {
       this.liveTicker = val;
       this.tickerSubscribers.forEach(cb => cb(this.liveTicker));
     });
+
+    if (typeof v?.users === 'number' && v.users > this.sliceVersions.users) {
+      this.sliceVersions.users = v.users;
+      this.usersChangedSubscribers.forEach(cb => cb());
+    }
   }
 
   private connectWebSocket() {
@@ -381,6 +510,11 @@ class VirtualEngineService {
                 this.userDeletedSubscribers.forEach(cb => cb(String(msg.data.userId)));
               }
               break;
+            case 'event:user-bets-reset':
+              if (msg.data?.userId) {
+                this.userBetsResetSubscribers.forEach(cb => cb(String(msg.data.userId)));
+              }
+              break;
             default:
               break;
           }
@@ -432,6 +566,11 @@ class VirtualEngineService {
               (typeof remote.ticker === 'number' && remote.ticker > this.sliceVersions.ticker)
             )
           : (typeof data.version === 'number' && data.version > this.stateVersion);
+
+        if (remote && typeof remote.users === 'number' && remote.users > this.sliceVersions.users) {
+          this.sliceVersions.users = remote.users;
+          this.usersChangedSubscribers.forEach(cb => cb());
+        }
 
         if (hasDiff) {
           await this.fetchInitialState();
@@ -566,6 +705,13 @@ class VirtualEngineService {
     };
   }
 
+  public onUserBetsReset(callback: (userId: string) => void): () => void {
+    this.userBetsResetSubscribers.push(callback);
+    return () => {
+      this.userBetsResetSubscribers = this.userBetsResetSubscribers.filter(cb => cb !== callback);
+    };
+  }
+
   public async fetchAdminUsers(): Promise<RegisteredUser[]> {
     const res = await fetch('/api/admin/users', {
       headers: this.getAdminHeaders(),
@@ -576,6 +722,46 @@ class VirtualEngineService {
       throw new Error(data.error || 'Failed to load users.');
     }
     return (data.users || []) as RegisteredUser[];
+  }
+
+  public async pushCloudSyncToServer(payload: {
+    users: RegisteredUser[];
+    deletedUserIds: string[];
+    clubs: Club[];
+    deletedClubIds: string[];
+    leagues: League[];
+    matches: Array<{
+      id: string;
+      league: string;
+      country: string;
+      homeTeam: string;
+      awayTeam: string;
+      homeScore: number;
+      awayScore: number;
+      minute: number;
+      status: 'UPCOMING' | 'LIVE' | 'FINISHED';
+      startsInSeconds: number;
+      isFeatured?: boolean;
+      homeOdds: number;
+      drawOdds: number;
+      awayOdds: number;
+    }>;
+  }): Promise<RegisteredUser[] | null> {
+    if (!this.adminToken) return null;
+    const res = await fetch('/api/admin/cloud-sync', {
+      method: 'POST',
+      headers: this.getAdminHeaders(),
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    this.applyFullState({
+      clubs: data.clubs,
+      leagues: data.leagues,
+      matches: data.matches,
+      versions: data.versions,
+    });
+    return Array.isArray(data.users) ? (data.users as RegisteredUser[]) : null;
   }
 
   public async lookupAdminUserById(userId: string): Promise<RegisteredUser> {
@@ -633,6 +819,21 @@ class VirtualEngineService {
       user: data.user as RegisteredUser,
       users: (data.users || []) as RegisteredUser[],
       depositedAmount: Number(data.depositedAmount) || amount,
+    };
+  }
+
+  public async resetAdminUserBets(userId: string): Promise<{ user: RegisteredUser; users: RegisteredUser[] }> {
+    const res = await fetch(`/api/admin/users/${encodeURIComponent(userId)}/reset-bets`, {
+      method: 'POST',
+      headers: this.getAdminHeaders()
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || 'Failed to reset user check bets.');
+    }
+    return {
+      user: data.user as RegisteredUser,
+      users: (data.users || []) as RegisteredUser[],
     };
   }
 
