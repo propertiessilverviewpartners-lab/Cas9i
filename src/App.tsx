@@ -375,9 +375,14 @@ export default function App() {
       return;
     }
 
-    if (user.isLoggedIn && user.id && user.id !== 'guest') {
-      void virtualEngine.fetchUserSession(user.id).then(session => {
-        if (!session) {
+    const syncUserFromServer = () => {
+      const current = userRef.current;
+      if (!current.isLoggedIn || current.isAdmin || !current.id || current.id === 'guest') return;
+      void virtualEngine.fetchUserSession(current.id).then(session => {
+        if (session.status === 'offline') {
+          return;
+        }
+        if (session.status === 'not_found') {
           activeOwnerIdRef.current = 'guest';
           setUser(DEFAULT_GUEST_USER);
           setPlacedBets([]);
@@ -395,8 +400,16 @@ export default function App() {
           totalWon: serverUser.totalWon ?? 0,
         })}`;
         if (activeOwnerIdRef.current === serverUser.id) {
-          setPlacedBets(serverPlaced);
-          setFxPositions(serverFx);
+          setPlacedBets(prev => {
+            const serverIds = new Set(serverPlaced.map(b => b.id));
+            const localUnsynced = prev.filter(b => !serverIds.has(b.id));
+            return localUnsynced.length > 0 ? [...localUnsynced, ...serverPlaced] : serverPlaced;
+          });
+          setFxPositions(prev => {
+            const serverIds = new Set(serverFx.map(p => p.id));
+            const localUnsynced = prev.filter(p => !serverIds.has(p.id));
+            return localUnsynced.length > 0 ? [...localUnsynced, ...serverFx] : serverFx;
+          });
         }
         setUser(prev =>
           prev.id === serverUser.id
@@ -422,7 +435,19 @@ export default function App() {
             : prev
         );
       });
+    };
+
+    if (user.isLoggedIn && user.id && user.id !== 'guest') {
+      syncUserFromServer();
     }
+
+    const unsubReconnect = virtualEngine.onReconnectSync(() => {
+      syncUserFromServer();
+    });
+
+    return () => {
+      unsubReconnect();
+    };
   }, []);
 
   // Real-time Virtual Engine Subscriptions (low-latency sync)

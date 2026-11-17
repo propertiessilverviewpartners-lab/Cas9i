@@ -29,7 +29,7 @@ import {
   OperationType,
   handleFirestoreError,
 } from '../firebase';
-import type { Club, DtmMatchRule, League, RegisteredUser, UserProfile, VirtualMatch } from '../types';
+import type { Club, DtmMatchRule, H2HRecord, League, RegisteredUser, UserProfile, VirtualMatch } from '../types';
 
 export interface CloudUserRecord {
   user: RegisteredUser;
@@ -63,6 +63,7 @@ export interface AdminCloudSnapshotState {
   leagues: League[];
   matches: CloudMatchRecord[];
   dtmRules: DtmMatchRule[];
+  h2hRecords: H2HRecord[];
 }
 
 function sanitizeId(raw: string): string {
@@ -667,6 +668,56 @@ export async function deleteCloudDtmRule(ruleId: string): Promise<void> {
   }
 }
 
+function docToH2HRecord(id: string, data: DocumentData): H2HRecord {
+  return {
+    id: typeof data.id === 'string' && data.id ? data.id : id,
+    matchId: String(data.matchId || ''),
+    roundNumber: Math.max(1, Math.floor(Number(data.roundNumber) || 1)),
+    league: String(data.league || 'Virtual League'),
+    homeTeam: String(data.homeTeam || 'Home'),
+    awayTeam: String(data.awayTeam || 'Away'),
+    homeScore: Math.max(0, Math.floor(Number(data.homeScore) || 0)),
+    awayScore: Math.max(0, Math.floor(Number(data.awayScore) || 0)),
+    firstHalfHomeScore: Math.max(0, Math.floor(Number(data.firstHalfHomeScore) || 0)),
+    firstHalfAwayScore: Math.max(0, Math.floor(Number(data.firstHalfAwayScore) || 0)),
+    firstGoalTeam:
+      data.firstGoalTeam === 'home' || data.firstGoalTeam === 'away' ? data.firstGoalTeam : undefined,
+    hadFiveMinGoal: Boolean(data.hadFiveMinGoal),
+    isZoom: Boolean(data.isZoom),
+    playedAt: typeof data.playedAt === 'number' && data.playedAt > 0 ? data.playedAt : Date.now(),
+  };
+}
+
+export async function upsertCloudH2HRecord(record: H2HRecord): Promise<void> {
+  if (!isFirebaseAdminUser(auth.currentUser)) return;
+  const cleanId = sanitizeId(record.id);
+  const payload: Record<string, unknown> = {
+    id: cleanId,
+    matchId: clampString(record.matchId, 128, cleanId) || cleanId,
+    roundNumber: Math.max(1, Math.floor(Number(record.roundNumber) || 1)),
+    league: clampString(record.league, 120, 'Virtual League') || 'Virtual League',
+    homeTeam: clampString(record.homeTeam, 100, 'Home') || 'Home',
+    awayTeam: clampString(record.awayTeam, 100, 'Away') || 'Away',
+    homeScore: Math.max(0, Math.min(999, Math.floor(Number(record.homeScore) || 0))),
+    awayScore: Math.max(0, Math.min(999, Math.floor(Number(record.awayScore) || 0))),
+    firstHalfHomeScore: Math.max(0, Math.min(999, Math.floor(Number(record.firstHalfHomeScore) || 0))),
+    firstHalfAwayScore: Math.max(0, Math.min(999, Math.floor(Number(record.firstHalfAwayScore) || 0))),
+    hadFiveMinGoal: Boolean(record.hadFiveMinGoal),
+    isZoom: Boolean(record.isZoom),
+    playedAt: typeof record.playedAt === 'number' && record.playedAt > 0 ? record.playedAt : Date.now(),
+    updatedAt: serverTimestamp(),
+  };
+  if (record.firstGoalTeam === 'home' || record.firstGoalTeam === 'away') {
+    payload.firstGoalTeam = record.firstGoalTeam;
+  }
+
+  try {
+    await setDoc(doc(db, 'h2hRecords', cleanId), payload);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `h2hRecords/${cleanId}`);
+  }
+}
+
 export function subscribeAdminCloudCollections(
   onChange: (state: AdminCloudSnapshotState) => void
 ): Unsubscribe {
@@ -678,6 +729,7 @@ export function subscribeAdminCloudCollections(
     leagues: [],
     matches: [],
     dtmRules: [],
+    h2hRecords: [],
   };
 
   let hydratedCount = 0;
@@ -696,6 +748,7 @@ export function subscribeAdminCloudCollections(
         leagues: [...currentState.leagues],
         matches: [...currentState.matches],
         dtmRules: [...currentState.dtmRules],
+        h2hRecords: [...currentState.h2hRecords],
       });
     }
   };
@@ -812,6 +865,15 @@ export function subscribeAdminCloudCollections(
     error => handleFirestoreError(error, OperationType.LIST, 'dtmRules')
   );
 
+  const unsubH2HRecords = onSnapshot(
+    collection(db, 'h2hRecords'),
+    snap => {
+      currentState.h2hRecords = snap.docs.map(d => docToH2HRecord(d.id, d.data()));
+      emitIfReady('h2hRecords');
+    },
+    error => handleFirestoreError(error, OperationType.LIST, 'h2hRecords')
+  );
+
   return () => {
     unsubUsers();
     unsubDeletedUsers();
@@ -820,5 +882,6 @@ export function subscribeAdminCloudCollections(
     unsubLeagues();
     unsubMatches();
     unsubDtmRules();
+    unsubH2HRecords();
   };
 }

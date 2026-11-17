@@ -56,14 +56,17 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({
     );
   };
 
-  // All previous direct meetings between homeTeam & awayTeam (latest first)
-  const pairH2H = h2hRecords
-    .filter(
-      r =>
-        (sameTeam(r.homeTeam, match.homeTeam) && sameTeam(r.awayTeam, match.awayTeam)) ||
-        (sameTeam(r.homeTeam, match.awayTeam) && sameTeam(r.awayTeam, match.homeTeam))
-    )
-    .sort((a, b) => b.playedAt - a.playedAt);
+  // Merge H2H embedded directly on the match with global H2H history (latest first, deduped)
+  const mergedPairMap = new Map<string, H2HRecord>();
+  for (const r of [...(match.recentH2H || []), ...h2hRecords]) {
+    const isDirectPair =
+      (sameTeam(r.homeTeam, match.homeTeam) && sameTeam(r.awayTeam, match.awayTeam)) ||
+      (sameTeam(r.homeTeam, match.awayTeam) && sameTeam(r.awayTeam, match.homeTeam));
+    if (!isDirectPair) continue;
+    const dedupeKey = typeof r.roundNumber === 'number' ? `${r.matchId}:r${r.roundNumber}` : r.id;
+    mergedPairMap.set(dedupeKey, r);
+  }
+  const pairH2H = Array.from(mergedPairMap.values()).sort((a, b) => b.playedAt - a.playedAt);
 
   // Individual previous meetings with other clubs (excluding direct meetings between the two)
   const getOtherClubH2H = (clubName: string, excludeOpponent: string) => {

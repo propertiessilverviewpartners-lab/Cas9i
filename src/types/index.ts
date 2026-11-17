@@ -100,6 +100,7 @@ export interface VirtualMatch {
     cornersAway: number;
   };
   events: MatchEvent[];
+  recentH2H?: H2HRecord[];
 }
 
 export interface H2HRecord {

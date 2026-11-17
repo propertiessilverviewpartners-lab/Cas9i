@@ -6,6 +6,60 @@ export const PRESET_FIXTURES_INFO = {
   allCount: 6,
 };
 
+const OFFLINE_SNAPSHOT_KEY = 'cas9i_offline_snapshot_v1';
+const PENDING_USER_OPS_KEY = 'cas9i_pending_user_ops_v1';
+const OFFLINE_DAILY_TARGET = 100;
+const OFFLINE_ZOOM_TARGET = 50;
+const OFFLINE_MAX_LIVE_WAVE = 10;
+
+interface OfflineSnapshot {
+  savedAt: number;
+  matches: VirtualMatch[];
+  h2hRecords: H2HRecord[];
+  fxAssets: FXAsset[];
+  clubs: Club[];
+  leagues: League[];
+  tipsterBetcodes: TipsterBetcode[];
+  leaderboard: LeaderboardEntry[];
+  liveTicker: LiveBetTickerItem[];
+}
+
+interface PendingUserOps {
+  balanceDeltas: Record<string, number>;
+  betsSync: Record<string, { placedBets: PlacedBet[]; fxPositions: FXPosition[]; totalBetsPlaced: number; totalWon: number }>;
+}
+
+const OFFLINE_SEED_LEAGUES: League[] = [
+  { id: 'lg-1', name: 'Spain - Copa del Rey', country: 'Spain', icon: '🏆', isCustom: false, createdAt: 1700000000000 },
+  { id: 'lg-2', name: 'Euro Qualification', country: 'Europe', icon: '⚽', isCustom: false, createdAt: 1700000000000 },
+  { id: 'lg-3', name: 'England - Premier Virtual', country: 'England', icon: '👑', isCustom: false, createdAt: 1700000000000 },
+  { id: 'lg-4', name: 'Germany - Bundesliga Virtual', country: 'Germany', icon: '🔥', isCustom: false, createdAt: 1700000000000 },
+  { id: 'lg-5', name: 'Italy - Serie A Virtual', country: 'Italy', icon: '🛡️', isCustom: false, createdAt: 1700000000000 },
+];
+
+const OFFLINE_SEED_CLUBS: Club[] = [
+  { id: 'club-1', name: 'Real Betis', shortName: 'BET', league: 'Spain - Copa del Rey', country: 'Spain', crest: '🟢', attack: 84, defense: 80 },
+  { id: 'club-2', name: 'CDA Navalcarnero', shortName: 'NAV', league: 'Spain - Copa del Rey', country: 'Spain', crest: '🔴', attack: 73, defense: 71 },
+  { id: 'club-3', name: 'Atletico Madrid', shortName: 'ATM', league: 'Spain - Copa del Rey', country: 'Spain', crest: '🔴', attack: 88, defense: 86 },
+  { id: 'club-4', name: 'Real Sociedad', shortName: 'RSO', league: 'Spain - Copa del Rey', country: 'Spain', crest: '🔵', attack: 83, defense: 81 },
+  { id: 'club-5', name: 'Iceland', shortName: 'ISL', league: 'Euro Qualification', country: 'Europe', crest: '❄️', attack: 75, defense: 74 },
+  { id: 'club-6', name: 'Greece', shortName: 'GRE', league: 'Euro Qualification', country: 'Europe', crest: '🏛️', attack: 79, defense: 80 },
+  { id: 'club-7', name: 'Portugal', shortName: 'POR', league: 'Euro Qualification', country: 'Europe', crest: '🦅', attack: 89, defense: 84 },
+  { id: 'club-8', name: 'Croatia', shortName: 'CRO', league: 'Euro Qualification', country: 'Europe', crest: '⚡', attack: 85, defense: 83 },
+  { id: 'club-9', name: 'Arsenal V', shortName: 'ARS', league: 'England - Premier Virtual', country: 'England', crest: '🔴', attack: 88, defense: 85 },
+  { id: 'club-10', name: 'Liverpool V', shortName: 'LIV', league: 'England - Premier Virtual', country: 'England', crest: '🔥', attack: 89, defense: 84 },
+  { id: 'club-11', name: 'Man City V', shortName: 'MCI', league: 'England - Premier Virtual', country: 'England', crest: '🔵', attack: 91, defense: 86 },
+  { id: 'club-12', name: 'Chelsea V', shortName: 'CHE', league: 'England - Premier Virtual', country: 'England', crest: '🦁', attack: 84, defense: 82 },
+  { id: 'club-13', name: 'Bayern V', shortName: 'BAY', league: 'Germany - Bundesliga Virtual', country: 'Germany', crest: '🔴', attack: 90, defense: 85 },
+  { id: 'club-14', name: 'Dortmund V', shortName: 'BVB', league: 'Germany - Bundesliga Virtual', country: 'Germany', crest: '🟡', attack: 86, defense: 80 },
+  { id: 'club-15', name: 'Leipzig V', shortName: 'RBL', league: 'Germany - Bundesliga Virtual', country: 'Germany', crest: '⚡', attack: 84, defense: 81 },
+  { id: 'club-16', name: 'Leverkusen V', shortName: 'LEV', league: 'Germany - Bundesliga Virtual', country: 'Germany', crest: '🛡️', attack: 87, defense: 83 },
+  { id: 'club-17', name: 'Inter V', shortName: 'INT', league: 'Italy - Serie A Virtual', country: 'Italy', crest: '🔵', attack: 88, defense: 86 },
+  { id: 'club-18', name: 'AC Milan V', shortName: 'MIL', league: 'Italy - Serie A Virtual', country: 'Italy', crest: '🔴', attack: 85, defense: 83 },
+  { id: 'club-19', name: 'Juventus V', shortName: 'JUV', league: 'Italy - Serie A Virtual', country: 'Italy', crest: '⭐', attack: 84, defense: 85 },
+  { id: 'club-20', name: 'Napoli V', shortName: 'NAP', league: 'Italy - Serie A Virtual', country: 'Italy', crest: '💎', attack: 86, defense: 82 },
+];
+
 class VirtualEngineService {
   private matches: VirtualMatch[] = [];
   private tipsterBetcodes: TipsterBetcode[] = [];
@@ -29,12 +83,17 @@ class VirtualEngineService {
   private userUpdatedSubscribers: Array<(user: RegisteredUser) => void> = [];
   private userDeletedSubscribers: Array<(userId: string) => void> = [];
   private userBetsResetSubscribers: Array<(userId: string) => void> = [];
+  private reconnectSyncSubscribers: Array<() => void> = [];
 
   private ws: WebSocket | null = null;
   private reconnectAttempts = 0;
   private adminToken: string | null = null;
   private fallbackPollId: ReturnType<typeof setInterval> | null = null;
+  private offlineSimId: ReturnType<typeof setInterval> | null = null;
   private heartbeatId: ReturnType<typeof setInterval> | null = null;
+  private lastServerContactAt = 0;
+  private lastSnapshotSaveAt = 0;
+  private offlineSimDirty = false;
   private stateVersion = 0;
   private sliceVersions = {
     clubs: 0,
@@ -51,15 +110,25 @@ class VirtualEngineService {
   constructor() {
     if (typeof window !== 'undefined') {
       this.adminToken = window.localStorage.getItem('cas9i_admin_token');
+      this.hydrateFromOfflineSnapshot();
+      this.startOfflineSimLoop();
       void this.fetchInitialState();
       this.connectWebSocket();
       this.startFallbackPoller();
 
+      window.addEventListener('online', () => {
+        void this.flushPendingUserOps();
+        void this.fetchInitialState();
+        this.connectWebSocket();
+        this.reconnectSyncSubscribers.forEach(cb => cb());
+      });
       window.addEventListener('focus', () => {
+        void this.flushPendingUserOps();
         void this.fetchInitialState();
       });
       document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible') {
+          void this.flushPendingUserOps();
           void this.fetchInitialState();
           if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
             this.connectWebSocket();
@@ -242,23 +311,25 @@ class VirtualEngineService {
     };
   }
 
-  public async fetchUserSession(userId: string): Promise<{
-    user: RegisteredUser;
-    placedBets: PlacedBet[];
-    fxPositions: FXPosition[];
-  } | null> {
+  public async fetchUserSession(userId: string): Promise<
+    | { status: 'ok'; user: RegisteredUser; placedBets: PlacedBet[]; fxPositions: FXPosition[] }
+    | { status: 'not_found' }
+    | { status: 'offline' }
+  > {
     try {
       const res = await fetch(`/api/auth/session/${encodeURIComponent(userId)}`, { cache: 'no-store' });
-      if (!res.ok) return null;
+      if (res.status === 404) return { status: 'not_found' };
+      if (!res.ok) return { status: 'offline' };
       const data = await res.json();
-      if (!data.ok || !data.user) return null;
+      if (!data.ok || !data.user) return { status: 'offline' };
       return {
+        status: 'ok',
         user: data.user as RegisteredUser,
         placedBets: Array.isArray(data.placedBets) ? (data.placedBets as PlacedBet[]) : [],
         fxPositions: Array.isArray(data.fxPositions) ? (data.fxPositions as FXPosition[]) : [],
       };
     } catch {
-      return null;
+      return { status: 'offline' };
     }
   }
 
@@ -278,29 +349,146 @@ class VirtualEngineService {
     return data.user as RegisteredUser;
   }
 
+  private readPendingUserOps(): PendingUserOps {
+    if (typeof window === 'undefined') return { balanceDeltas: {}, betsSync: {} };
+    try {
+      const raw = window.localStorage.getItem(PENDING_USER_OPS_KEY);
+      if (!raw) return { balanceDeltas: {}, betsSync: {} };
+      const parsed = JSON.parse(raw) as Partial<PendingUserOps>;
+      return {
+        balanceDeltas: parsed.balanceDeltas && typeof parsed.balanceDeltas === 'object' ? parsed.balanceDeltas : {},
+        betsSync: parsed.betsSync && typeof parsed.betsSync === 'object' ? parsed.betsSync : {},
+      };
+    } catch {
+      return { balanceDeltas: {}, betsSync: {} };
+    }
+  }
+
+  private writePendingUserOps(ops: PendingUserOps) {
+    if (typeof window === 'undefined') return;
+    try {
+      window.localStorage.setItem(PENDING_USER_OPS_KEY, JSON.stringify(ops));
+    } catch {
+      // ignore storage quota errors
+    }
+  }
+
+  private queuePendingBetsSync(
+    userId: string,
+    payload: { placedBets: PlacedBet[]; fxPositions: FXPosition[]; totalBetsPlaced: number; totalWon: number }
+  ) {
+    const ops = this.readPendingUserOps();
+    ops.betsSync[userId] = payload;
+    this.writePendingUserOps(ops);
+  }
+
+  private queuePendingBalanceDelta(userId: string, delta: number) {
+    const ops = this.readPendingUserOps();
+    ops.balanceDeltas[userId] = Math.round(((ops.balanceDeltas[userId] || 0) + delta) * 100) / 100;
+    this.writePendingUserOps(ops);
+  }
+
+  public async flushPendingUserOps() {
+    if (typeof window === 'undefined' || !navigator.onLine) return;
+    const ops = this.readPendingUserOps();
+    let changed = false;
+
+    for (const [userId, delta] of Object.entries(ops.balanceDeltas)) {
+      if (!Number.isFinite(delta) || delta === 0) {
+        delete ops.balanceDeltas[userId];
+        changed = true;
+        continue;
+      }
+      try {
+        const res = userId === 'admin-cas9i'
+          ? (this.adminToken
+              ? await fetch('/api/auth/admin/balance', {
+                  method: 'POST',
+                  headers: this.getAdminHeaders(),
+                  body: JSON.stringify({ delta }),
+                })
+              : null)
+          : await fetch(`/api/auth/session/${encodeURIComponent(userId)}/balance`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ delta }),
+            });
+        if (res && res.ok) {
+          delete ops.balanceDeltas[userId];
+          changed = true;
+        }
+      } catch {
+        // still offline; keep queued
+      }
+    }
+
+    for (const [userId, payload] of Object.entries(ops.betsSync)) {
+      try {
+        const res = await fetch(`/api/auth/session/${encodeURIComponent(userId)}/bets`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        if (res.ok) {
+          delete ops.betsSync[userId];
+          changed = true;
+        }
+      } catch {
+        // still offline; keep queued
+      }
+    }
+
+    if (changed) {
+      this.writePendingUserOps(ops);
+    }
+  }
+
+  public onReconnectSync(callback: () => void): () => void {
+    this.reconnectSyncSubscribers.push(callback);
+    return () => {
+      this.reconnectSyncSubscribers = this.reconnectSyncSubscribers.filter(cb => cb !== callback);
+    };
+  }
+
   public syncUserBets(
     userId: string,
     payload: { placedBets: PlacedBet[]; fxPositions: FXPosition[]; totalBetsPlaced: number; totalWon: number }
   ) {
     if (!userId || userId === 'guest' || userId === 'admin-cas9i') return;
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      this.queuePendingBetsSync(userId, payload);
+      return;
+    }
     void fetch(`/api/auth/session/${encodeURIComponent(userId)}/bets`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
-    }).catch(() => {
-      // ignore transient network errors
-    });
+    })
+      .then(res => {
+        if (!res.ok) this.queuePendingBetsSync(userId, payload);
+      })
+      .catch(() => {
+        this.queuePendingBetsSync(userId, payload);
+      });
   }
 
   public syncAdminBalanceDelta(delta: number) {
     if (!this.adminToken || !Number.isFinite(delta) || delta === 0) return;
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      this.queuePendingBalanceDelta('admin-cas9i', delta);
+      return;
+    }
     void fetch('/api/auth/admin/balance', {
       method: 'POST',
       headers: this.getAdminHeaders(),
       body: JSON.stringify({ delta })
-    }).catch(() => {
-      // ignore transient network errors
-    });
+    })
+      .then(res => {
+        if (!res.ok) this.queuePendingBalanceDelta('admin-cas9i', delta);
+      })
+      .catch(() => {
+        this.queuePendingBalanceDelta('admin-cas9i', delta);
+      });
   }
 
   public syncUserBalanceDelta(userId: string, delta: number) {
@@ -309,13 +497,635 @@ class VirtualEngineService {
       this.syncAdminBalanceDelta(delta);
       return;
     }
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      this.queuePendingBalanceDelta(userId, delta);
+      return;
+    }
     void fetch(`/api/auth/session/${encodeURIComponent(userId)}/balance`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ delta })
-    }).catch(() => {
-      // ignore transient network errors
+    })
+      .then(res => {
+        if (!res.ok) this.queuePendingBalanceDelta(userId, delta);
+      })
+      .catch(() => {
+        this.queuePendingBalanceDelta(userId, delta);
+      });
+  }
+
+  private saveOfflineSnapshot(force = false) {
+    if (typeof window === 'undefined') return;
+    const now = Date.now();
+    if (!force && now - this.lastSnapshotSaveAt < 2000) return;
+    this.lastSnapshotSaveAt = now;
+    try {
+      const snapshot: OfflineSnapshot = {
+        savedAt: now,
+        matches: this.matches.slice(0, 260),
+        h2hRecords: this.h2hRecords.slice(-600),
+        fxAssets: this.fxAssets,
+        clubs: this.clubs,
+        leagues: this.leagues,
+        tipsterBetcodes: this.tipsterBetcodes,
+        leaderboard: this.leaderboard,
+        liveTicker: this.liveTicker.slice(0, 30),
+      };
+      window.localStorage.setItem(OFFLINE_SNAPSHOT_KEY, JSON.stringify(snapshot));
+    } catch {
+      // ignore storage quota errors
+    }
+  }
+
+  private hydrateFromOfflineSnapshot() {
+    if (typeof window === 'undefined') return;
+    try {
+      const raw = window.localStorage.getItem(OFFLINE_SNAPSHOT_KEY);
+      if (!raw) {
+        if (!navigator.onLine) {
+          this.seedOfflineFallbackFixtures();
+        }
+        return;
+      }
+      const snap = JSON.parse(raw) as Partial<OfflineSnapshot>;
+      if (Array.isArray(snap.clubs) && snap.clubs.length > 0) this.clubs = snap.clubs;
+      if (Array.isArray(snap.leagues) && snap.leagues.length > 0) this.leagues = snap.leagues;
+      if (Array.isArray(snap.h2hRecords)) this.h2hRecords = snap.h2hRecords;
+      if (Array.isArray(snap.fxAssets)) this.fxAssets = snap.fxAssets;
+      if (Array.isArray(snap.tipsterBetcodes)) this.tipsterBetcodes = snap.tipsterBetcodes;
+      if (Array.isArray(snap.leaderboard)) this.leaderboard = snap.leaderboard;
+      if (Array.isArray(snap.liveTicker)) this.liveTicker = snap.liveTicker;
+      if (Array.isArray(snap.matches) && snap.matches.length > 0) {
+        this.matches = snap.matches;
+        // Catch up offline matches immediately using wall-clock elapsed time
+        this.advanceMatchesOffline(Date.now(), false);
+      } else if (!navigator.onLine) {
+        this.seedOfflineFallbackFixtures();
+      }
+    } catch {
+      if (!navigator.onLine) {
+        this.seedOfflineFallbackFixtures();
+      }
+    }
+  }
+
+  private buildOfflineOdds(homeAtt: number, homeDef: number, awayAtt: number, awayDef: number) {
+    const hPow = (homeAtt + homeDef) / 2 + 2;
+    const aPow = (awayAtt + awayDef) / 2;
+    const diff = (hPow - aPow) / 100;
+    const home = Number(Math.max(1.35, Math.min(4.8, 2.25 - diff * 1.4)).toFixed(2));
+    const away = Number(Math.max(1.4, Math.min(5.2, 2.55 + diff * 1.5)).toFixed(2));
+    const draw = Number(Math.max(2.9, Math.min(4.6, 3.45 + Math.abs(diff) * 0.6)).toFixed(2));
+    const overUnderLines = Array.from({ length: 16 }, (_, idx) => {
+      const line = 15 + idx;
+      const t = idx / 15;
+      return {
+        line,
+        over: Number((2.0 + t * 14.5).toFixed(2)),
+        under: Number((18.75 - t * 16.4).toFixed(2)),
+      };
     });
+    return {
+      home,
+      draw,
+      away,
+      firstGoalHome: Number(Math.max(1.55, home * 0.85).toFixed(2)),
+      firstGoalAway: Number(Math.max(1.65, away * 0.88).toFixed(2)),
+      fiveMinYes: 2.15,
+      fiveMinNo: 1.68,
+      fiveMinOver5: 3.4,
+      ht1Over10: Number(Math.max(1.85, home * 1.12).toFixed(2)),
+      htXOver10: 4.1,
+      ht2Over10: Number(Math.max(1.95, away * 1.15).toFixed(2)),
+      htOver15: 2.45,
+      htUnder15: 1.55,
+      sh1Over15: Number(Math.max(1.8, home * 1.05).toFixed(2)),
+      shXOver15: 3.9,
+      sh2Over15: Number(Math.max(1.9, away * 1.08).toFixed(2)),
+      oddGoals: 1.92,
+      evenGoals: 1.92,
+      overUnderLines,
+      correctScores: [
+        { score: '12:9', odds: 14.5 },
+        { score: '14:11', odds: 15.2 },
+        { score: '15:10', odds: 16.0 },
+        { score: '11:13', odds: 17.5 },
+        { score: '16:12', odds: 19.0 },
+        { score: '13:13', odds: 21.0 },
+      ],
+    };
+  }
+
+  private getPairRecentH2H(homeTeam: string, awayTeam: string): H2HRecord[] {
+    const h = homeTeam.trim().toLowerCase();
+    const a = awayTeam.trim().toLowerCase();
+    return this.h2hRecords
+      .filter(
+        r =>
+          (r.homeTeam.trim().toLowerCase() === h && r.awayTeam.trim().toLowerCase() === a) ||
+          (r.homeTeam.trim().toLowerCase() === a && r.awayTeam.trim().toLowerCase() === h)
+      )
+      .sort((x, y) => y.playedAt - x.playedAt)
+      .slice(0, 25);
+  }
+
+  private seedOfflineFallbackFixtures() {
+    if (this.clubs.length < 2) this.clubs = [...OFFLINE_SEED_CLUBS];
+    if (this.leagues.length === 0) this.leagues = [...OFFLINE_SEED_LEAGUES];
+    const now = Date.now();
+    const dayKey = new Date(now).toISOString().slice(0, 10);
+    const tomorrowKey = new Date(now + 86400000).toISOString().slice(0, 10);
+
+    const pairs: Array<{ home: Club; away: Club }> = [];
+    for (let i = 0; i < this.clubs.length; i += 1) {
+      for (let j = i + 1; j < this.clubs.length; j += 1) {
+        if (this.clubs[i].league === this.clubs[j].league) {
+          pairs.push({ home: this.clubs[i], away: this.clubs[j] });
+        }
+      }
+    }
+    while (pairs.length < OFFLINE_DAILY_TARGET) {
+      for (let i = 0; i < this.clubs.length && pairs.length < OFFLINE_DAILY_TARGET; i += 1) {
+        const home = this.clubs[i];
+        const away = this.clubs[(i + 1 + Math.floor(pairs.length / this.clubs.length)) % this.clubs.length];
+        if (home.id !== away.id) pairs.push({ home, away });
+      }
+    }
+
+    const generated: VirtualMatch[] = [];
+    const buildBucket = (bucket: 'TODAY' | 'NEXT_DAY', dateStr: string, count: number) => {
+      for (let idx = 0; idx < count; idx += 1) {
+        const pair = pairs[idx % pairs.length];
+        const waveIdx = Math.floor(idx / OFFLINE_MAX_LIVE_WAVE);
+        const slot = idx % OFFLINE_MAX_LIVE_WAVE;
+        const kickoffAt =
+          bucket === 'TODAY'
+            ? now + (4 + waveIdx * 72 + slot) * 60000
+            : now + (24 * 60 + waveIdx * 72 + slot * 2) * 60000;
+        const dt = new Date(kickoffAt);
+        const hhmm = `${String(dt.getHours()).padStart(2, '0')}:${String(dt.getMinutes()).padStart(2, '0')}`;
+        generated.push({
+          id: `offline-${dateStr}-${bucket.toLowerCase()}-${idx + 1}`,
+          league: pair.home.league,
+          country: pair.home.country,
+          homeTeam: pair.home.name,
+          awayTeam: pair.away.name,
+          homeScore: 0,
+          awayScore: 0,
+          firstHalfHomeScore: 0,
+          firstHalfAwayScore: 0,
+          roundNumber: 1,
+          minute: 0,
+          durationMinutes: 60,
+          status: 'UPCOMING',
+          scheduledTime: bucket === 'TODAY' ? `Today ${hhmm}` : `Tomorrow ${hhmm}`,
+          startsInSeconds: Math.max(10, Math.ceil((kickoffAt - now) / 1000)),
+          kickoffAt,
+          dayBucket: bucket,
+          matchDate: dateStr,
+          isSystemDaily: true,
+          isFeatured: bucket === 'TODAY' && idx === 0,
+          odds: this.buildOfflineOdds(pair.home.attack, pair.home.defense, pair.away.attack, pair.away.defense),
+          oddsDirection: {},
+          stats: {
+            possessionHome: 52,
+            possessionAway: 48,
+            dangerousAttacksHome: 0,
+            dangerousAttacksAway: 0,
+            shotsOnTargetHome: 0,
+            shotsOnTargetAway: 0,
+            cornersHome: 0,
+            cornersAway: 0,
+          },
+          events: [{ minute: 0, text: `Daily fixed match scheduled (60' standard): ${pair.home.name} vs ${pair.away.name}`, type: 'whistle' }],
+          recentH2H: this.getPairRecentH2H(pair.home.name, pair.away.name),
+        });
+      }
+    };
+
+    buildBucket('TODAY', dayKey, OFFLINE_DAILY_TARGET);
+    buildBucket('NEXT_DAY', tomorrowKey, OFFLINE_DAILY_TARGET);
+
+    for (let idx = 0; idx < OFFLINE_ZOOM_TARGET; idx += 1) {
+      const pair = pairs[(idx * 3) % pairs.length];
+      const waveIdx = Math.floor(idx / 5);
+      const slot = idx % 5;
+      const kickoffAt = now + (45 + waveIdx * 120 + slot * 3) * 1000;
+      generated.push({
+        id: `offline-zoom-${dayKey}-${idx + 1}`,
+        league: pair.home.league,
+        country: pair.home.country,
+        homeTeam: pair.home.name,
+        awayTeam: pair.away.name,
+        homeScore: 0,
+        awayScore: 0,
+        firstHalfHomeScore: 0,
+        firstHalfAwayScore: 0,
+        roundNumber: 1,
+        minute: 0,
+        durationMinutes: 2,
+        durationSeconds: 90,
+        elapsedSeconds: 0,
+        isZoom: true,
+        status: 'UPCOMING',
+        scheduledTime: `Starts in ${Math.max(5, Math.ceil((kickoffAt - now) / 1000))}s`,
+        startsInSeconds: Math.max(5, Math.ceil((kickoffAt - now) / 1000)),
+        kickoffAt,
+        dayBucket: 'TODAY',
+        matchDate: dayKey,
+        isSystemDaily: true,
+        isFeatured: false,
+        odds: this.buildOfflineOdds(pair.home.attack, pair.home.defense, pair.away.attack, pair.away.defense),
+        oddsDirection: {},
+        stats: {
+          possessionHome: 51,
+          possessionAway: 49,
+          dangerousAttacksHome: 0,
+          dangerousAttacksAway: 0,
+          shotsOnTargetHome: 0,
+          shotsOnTargetAway: 0,
+          cornersHome: 0,
+          cornersAway: 0,
+        },
+        events: [{ minute: 0, text: `Zoom 90s match scheduled: ${pair.home.name} vs ${pair.away.name}`, type: 'whistle' }],
+        recentH2H: this.getPairRecentH2H(pair.home.name, pair.away.name),
+      });
+    }
+
+    this.matches = generated;
+    if (this.fxAssets.length === 0) {
+      const defaultOdds = {
+        '10m': { rise: 1.88, fall: 1.92 },
+        '15m': { rise: 1.9, fall: 1.9 },
+        '20m': { rise: 1.95, fall: 1.86 },
+        '1h': { rise: 2.05, fall: 1.82 },
+      };
+      this.fxAssets = [
+        {
+          id: 'fx-eurusd',
+          symbol: 'EUR/USD',
+          name: 'Euro / US Dollar',
+          category: 'forex',
+          sector: 'Major Currency',
+          region: 'Europe / US',
+          description: 'Major EUR/USD virtual spot FX rate.',
+          price: 1.0842,
+          openPrice: 1.0842,
+          high24h: 1.0885,
+          low24h: 1.0801,
+          decimals: 4,
+          spread: '0.2 pips',
+          volatilityLabel: 'Medium',
+          trendDirection: 'FLAT',
+          trendStrength: 50,
+          changePercent: 0,
+          oddsByDuration: defaultOdds,
+          history: [{ time: now, price: 1.0842 }],
+        },
+        {
+          id: 'fx-us10y',
+          symbol: 'US10Y',
+          name: 'US 10Y Treasury Yield',
+          category: 'bonds',
+          sector: 'Government Bonds',
+          region: 'United States',
+          description: '10-Year US Sovereign benchmark yield.',
+          price: 4.245,
+          openPrice: 4.245,
+          high24h: 4.29,
+          low24h: 4.21,
+          decimals: 3,
+          unitSuffix: '%',
+          spread: '0.5 bps',
+          yieldOrDividend: '4.25%',
+          volatilityLabel: 'Low',
+          trendDirection: 'FLAT',
+          trendStrength: 48,
+          changePercent: 0,
+          oddsByDuration: defaultOdds,
+          history: [{ time: now, price: 4.245 }],
+        },
+        {
+          id: 'fx-nvda',
+          symbol: 'NVDA',
+          name: 'NVIDIA Virtual Equity',
+          category: 'shares',
+          sector: 'Semiconductors',
+          region: 'United States',
+          description: 'Global GPU & compute hardware index share.',
+          price: 142.85,
+          openPrice: 142.85,
+          high24h: 145.1,
+          low24h: 140.4,
+          decimals: 2,
+          unitPrefix: '$',
+          spread: '$0.04',
+          volatilityLabel: 'High',
+          trendDirection: 'FLAT',
+          trendStrength: 52,
+          changePercent: 0,
+          oddsByDuration: defaultOdds,
+          history: [{ time: now, price: 142.85 }],
+        },
+      ];
+    }
+    this.saveOfflineSnapshot(true);
+  }
+
+  private mergeOfflineH2HRecords(incoming: H2HRecord[]): H2HRecord[] {
+    const map = new Map<string, H2HRecord>();
+    for (const r of this.h2hRecords) {
+      const k = r.roundNumber ? `${r.matchId}:r${r.roundNumber}` : r.id;
+      map.set(k, r);
+    }
+    for (const r of incoming) {
+      const k = r.roundNumber ? `${r.matchId}:r${r.roundNumber}` : r.id;
+      map.set(k, r);
+    }
+    const all = Array.from(map.values()).sort((a, b) => a.playedAt - b.playedAt);
+    const nonZoom = all.filter(r => !r.isZoom).slice(-1500);
+    const zoom = all.filter(r => Boolean(r.isZoom)).slice(-900);
+    return [...nonZoom, ...zoom].sort((a, b) => a.playedAt - b.playedAt);
+  }
+
+  private advanceMatchesOffline(now: number, notify = true) {
+    if (this.matches.length === 0) return;
+
+    let anyChanged = false;
+    const newlyRecorded: H2HRecord[] = [];
+    const liveDailyNow = this.matches.filter(m => !m.isZoom && m.dayBucket !== 'NEXT_DAY' && m.status === 'LIVE').length;
+    let activeDailyLive = liveDailyNow;
+
+    const nextMatches = this.matches.map(raw => {
+      let m: VirtualMatch = {
+        ...raw,
+        odds: {
+          ...raw.odds,
+          correctScores: [...(raw.odds.correctScores || [])],
+          overUnderLines: [...(raw.odds.overUnderLines || [])],
+        },
+        stats: { ...raw.stats },
+        events: [...raw.events],
+        recentH2H: Array.isArray(raw.recentH2H) ? [...raw.recentH2H] : [],
+        oddsDirection: {},
+      };
+
+      const isZoom = Boolean(m.isZoom);
+      const durationMin = m.durationMinutes || 60;
+      const zoomDurationSec = m.durationSeconds || 90;
+      const matchDurationMs = isZoom ? zoomDurationSec * 1000 : durationMin * 60000;
+      const resetDelayMs = isZoom ? 20000 : 20 * 60000;
+      const cycleMs = matchDurationMs + resetDelayMs;
+      const maxRounds = isZoom ? 3 : 8;
+
+      if (m.kickoffAt && now - m.kickoffAt > maxRounds * cycleMs) {
+        const skip = Math.floor((now - m.kickoffAt) / cycleMs) - maxRounds;
+        if (skip > 0) {
+          m.kickoffAt += skip * cycleMs;
+          m.roundNumber = (m.roundNumber || 1) + skip;
+          anyChanged = true;
+        }
+      }
+
+      let roundsProcessed = 0;
+      while (roundsProcessed < maxRounds + 1) {
+        const kickoffMs = m.kickoffAt;
+        if (!kickoffMs) break;
+
+        if (now < kickoffMs) {
+          const secsLeft = Math.max(1, Math.ceil((kickoffMs - now) / 1000));
+          if (secsLeft !== m.startsInSeconds) {
+            m.startsInSeconds = secsLeft;
+            if (isZoom) {
+              m.scheduledTime = secsLeft < 60 ? `Starts in ${secsLeft}s` : `Starts in ${Math.round(secsLeft / 60)}m`;
+            }
+            anyChanged = true;
+          }
+          break;
+        }
+
+        const elapsedMs = now - kickoffMs;
+        const canStartLive =
+          isZoom ||
+          m.dayBucket === 'NEXT_DAY' ||
+          elapsedMs >= matchDurationMs ||
+          activeDailyLive < OFFLINE_MAX_LIVE_WAVE;
+
+        if (m.status === 'UPCOMING') {
+          if (!canStartLive) {
+            m.startsInSeconds = 10;
+            break;
+          }
+          m.status = 'LIVE';
+          m.minute = 1;
+          m.elapsedSeconds = isZoom ? 1 : undefined;
+          m.startsInSeconds = 0;
+          m.scheduledTime = 'Live Now';
+          m.events = [
+            {
+              minute: 1,
+              text: isZoom ? 'Kickoff! 90s Zoom simulation is LIVE.' : "Kickoff! 60' standard match is now LIVE.",
+              type: 'whistle',
+            },
+            ...m.events.slice(0, 9),
+          ];
+          if (!isZoom && m.dayBucket !== 'NEXT_DAY') activeDailyLive += 1;
+          anyChanged = true;
+        }
+
+        const applyOfflineGoal = (stepClock: number, isHome: boolean) => {
+          if (isHome) m.homeScore += 1;
+          else m.awayScore += 1;
+          if (!m.firstGoalTeam) m.firstGoalTeam = isHome ? 'home' : 'away';
+          const fiveThreshold = isZoom ? 8 : 5;
+          const halfThreshold = isZoom ? 45 : 30;
+          if (stepClock <= fiveThreshold) m.hadFiveMinGoal = true;
+          if (stepClock <= halfThreshold) {
+            if (isHome) m.firstHalfHomeScore = (m.firstHalfHomeScore || 0) + 1;
+            else m.firstHalfAwayScore = (m.firstHalfAwayScore || 0) + 1;
+          }
+          const teamName = isHome ? m.homeTeam : m.awayTeam;
+          m.events = [
+            {
+              minute: stepClock,
+              text: `GOAL! ${teamName} (${m.homeScore} - ${m.awayScore})`,
+              type: 'goal',
+              team: isHome ? 'home' : 'away',
+            },
+            ...m.events.slice(0, 14),
+          ];
+        };
+
+        if (isZoom) {
+          const targetSec = Math.min(zoomDurationSec, Math.max(1, Math.floor(elapsedMs / 1000) + 1));
+          const curSec = Math.max(0, m.elapsedSeconds || 0);
+          const steps = Math.max(0, Math.floor((Math.min(elapsedMs >= matchDurationMs ? zoomDurationSec : targetSec, zoomDurationSec) - curSec) / 1.5));
+          for (let s = 1; s <= steps; s += 1) {
+            const stepSec = Math.min(zoomDurationSec, Math.round(curSec + s * 1.5));
+            m.elapsedSeconds = stepSec;
+            m.minute = Math.min(60, Math.max(1, Math.ceil((stepSec / zoomDurationSec) * 60)));
+            if (Math.random() < 0.24) {
+              applyOfflineGoal(stepSec, Math.random() < (m.stats.possessionHome || 50) / 100);
+            }
+          }
+          if (targetSec !== m.elapsedSeconds) {
+            m.elapsedSeconds = targetSec;
+            m.minute = Math.min(60, Math.max(1, Math.ceil((targetSec / zoomDurationSec) * 60)));
+            anyChanged = true;
+          }
+        } else {
+          const targetMin = Math.min(durationMin, Math.max(1, Math.floor(elapsedMs / 60000) + 1));
+          const curMin = Math.max(0, m.minute || 0);
+          const endMin = elapsedMs >= matchDurationMs ? durationMin : targetMin;
+          if (endMin > curMin) {
+            for (let min = curMin + 1; min <= endMin; min += 1) {
+              m.minute = min;
+              if (Math.random() < 0.352) {
+                applyOfflineGoal(min, Math.random() < (m.stats.possessionHome || 50) / 100);
+              }
+            }
+            anyChanged = true;
+          }
+        }
+
+        if (elapsedMs >= matchDurationMs) {
+          const roundNo = m.roundNumber || 1;
+          const conclusionAt = kickoffMs + matchDurationMs;
+          const record: H2HRecord = {
+            id: `h2h-${m.id}-r${roundNo}`,
+            matchId: m.id,
+            roundNumber: roundNo,
+            league: m.league,
+            homeTeam: m.homeTeam,
+            awayTeam: m.awayTeam,
+            homeScore: m.homeScore,
+            awayScore: m.awayScore,
+            firstHalfHomeScore: m.firstHalfHomeScore || 0,
+            firstHalfAwayScore: m.firstHalfAwayScore || 0,
+            firstGoalTeam: m.firstGoalTeam,
+            hadFiveMinGoal: m.hadFiveMinGoal,
+            isZoom,
+            playedAt: conclusionAt,
+          };
+          newlyRecorded.push(record);
+
+          const prevRecent = Array.isArray(m.recentH2H) ? m.recentH2H : [];
+          const nextRecent = [record, ...prevRecent.filter(r => !(r.matchId === record.matchId && r.roundNumber === record.roundNumber))].slice(0, 25);
+          const nextRound = roundNo + 1;
+          const nextKickoff = conclusionAt + resetDelayMs;
+          const nextStartSec = Math.max(5, Math.ceil((nextKickoff - now) / 1000));
+          const dtNext = new Date(nextKickoff);
+          const hhmmNext = `${String(dtNext.getHours()).padStart(2, '0')}:${String(dtNext.getMinutes()).padStart(2, '0')}`;
+
+          m = {
+            ...m,
+            homeScore: 0,
+            awayScore: 0,
+            firstHalfHomeScore: 0,
+            firstHalfAwayScore: 0,
+            firstGoalTeam: undefined,
+            hadFiveMinGoal: false,
+            roundNumber: nextRound,
+            minute: 0,
+            elapsedSeconds: isZoom ? 0 : undefined,
+            status: 'UPCOMING',
+            kickoffAt: nextKickoff,
+            startsInSeconds: nextStartSec,
+            scheduledTime: isZoom
+              ? `Starts in ${nextStartSec}s`
+              : `${m.dayBucket === 'NEXT_DAY' ? 'Tomorrow' : 'Today'} ${hhmmNext}`,
+            events: [
+              {
+                minute: 0,
+                text: isZoom
+                  ? `Zoom 90s Round #${nextRound} ready: ${m.homeTeam} vs ${m.awayTeam}`
+                  : `Virtual 60' Round #${nextRound} ready: ${m.homeTeam} vs ${m.awayTeam}`,
+                type: 'whistle',
+              },
+            ],
+            recentH2H: nextRecent,
+          };
+          anyChanged = true;
+          roundsProcessed += 1;
+        } else {
+          break;
+        }
+      }
+
+      return m;
+    });
+
+    // Advance FX market ticks gently when offline
+    if (this.fxAssets.length > 0 && notify) {
+      this.fxAssets = this.fxAssets.map(asset => {
+        const deltaPct = (Math.random() - 0.495) * 0.0022;
+        const decimals = typeof asset.decimals === 'number' ? asset.decimals : asset.price > 100 ? 2 : 4;
+        const nextPrice = Number(Math.max(0.01, asset.price * (1 + deltaPct)).toFixed(decimals));
+        const trendDirection: 'RISING' | 'FALLING' | 'FLAT' =
+          nextPrice > asset.price ? 'RISING' : nextPrice < asset.price ? 'FALLING' : 'FLAT';
+        const changePercent = asset.openPrice > 0 ? Number((((nextPrice - asset.openPrice) / asset.openPrice) * 100).toFixed(2)) : 0;
+        return {
+          ...asset,
+          price: nextPrice,
+          high24h: Math.max(asset.high24h, nextPrice),
+          low24h: Math.min(asset.low24h, nextPrice),
+          changePercent,
+          trendDirection,
+          history: [...asset.history.slice(-29), { time: now, price: nextPrice }],
+        };
+      });
+      this.fxSubscribers.forEach(cb => cb(this.fxAssets));
+    }
+
+    if (newlyRecorded.length > 0) {
+      this.h2hRecords = this.mergeOfflineH2HRecords(newlyRecorded);
+      if (notify) {
+        this.h2hSubscribers.forEach(cb => cb(this.h2hRecords));
+      }
+    }
+
+    if (anyChanged) {
+      this.matches = nextMatches;
+      this.offlineSimDirty = true;
+      this.saveOfflineSnapshot(newlyRecorded.length > 0);
+      if (notify) {
+        this.matchSubscribers.forEach(cb => cb(this.matches));
+      }
+    }
+  }
+
+  private startOfflineSimLoop() {
+    if (this.offlineSimId || typeof window === 'undefined') return;
+    this.offlineSimId = setInterval(() => {
+      const wsOpen = Boolean(this.ws && this.ws.readyState === WebSocket.OPEN);
+      const isDisconnected = !navigator.onLine || (!wsOpen && Date.now() - this.lastServerContactAt >= 4500);
+      if (!isDisconnected) return;
+      if (this.matches.length === 0) {
+        this.seedOfflineFallbackFixtures();
+        this.matchSubscribers.forEach(cb => cb(this.matches));
+        this.fxSubscribers.forEach(cb => cb(this.fxAssets));
+        this.clubSubscribers.forEach(cb => cb(this.clubs));
+        this.leagueSubscribers.forEach(cb => cb(this.leagues));
+      }
+      this.advanceMatchesOffline(Date.now(), true);
+    }, 1500);
+  }
+
+  private resetSliceVersionsForReconnect() {
+    if (!this.offlineSimDirty) return;
+    this.offlineSimDirty = false;
+    this.stateVersion = 0;
+    this.sliceVersions = {
+      clubs: 0,
+      leagues: 0,
+      matches: 0,
+      tipster: 0,
+      h2h: 0,
+      fx: 0,
+      leaderboard: 0,
+      ticker: 0,
+      users: this.sliceVersions.users,
+    };
   }
 
   private async fetchInitialState() {
@@ -323,9 +1133,15 @@ class VirtualEngineService {
       const res = await fetch('/api/state', { cache: 'no-store' });
       if (!res.ok) return;
       const data = await res.json();
+      this.lastServerContactAt = Date.now();
+      this.resetSliceVersionsForReconnect();
       this.applyFullState(data);
+      void this.flushPendingUserOps();
     } catch {
-      // ignore transient network errors on startup; WebSocket/poller will retry
+      if (this.matches.length === 0 && typeof navigator !== 'undefined' && !navigator.onLine) {
+        this.seedOfflineFallbackFixtures();
+        this.matchSubscribers.forEach(cb => cb(this.matches));
+      }
     }
   }
 
@@ -403,6 +1219,8 @@ class VirtualEngineService {
       this.sliceVersions.users = v.users;
       this.usersChangedSubscribers.forEach(cb => cb());
     }
+
+    this.saveOfflineSnapshot(false);
   }
 
   private connectWebSocket() {
@@ -420,6 +1238,9 @@ class VirtualEngineService {
 
       socket.onopen = () => {
         this.reconnectAttempts = 0;
+        this.lastServerContactAt = Date.now();
+        this.resetSliceVersionsForReconnect();
+        void this.flushPendingUserOps();
         void this.fetchInitialState();
         if (this.heartbeatId) clearInterval(this.heartbeatId);
         this.heartbeatId = setInterval(() => {
@@ -432,12 +1253,14 @@ class VirtualEngineService {
       socket.onmessage = evt => {
         try {
           const msg = JSON.parse(evt.data);
+          this.lastServerContactAt = Date.now();
           if (typeof msg.version === 'number' && msg.version > this.stateVersion) {
             this.stateVersion = msg.version;
           }
           const incomingSliceVer = typeof msg.sliceVersion === 'number' ? msg.sliceVersion : undefined;
           switch (msg.type) {
             case 'init':
+              this.resetSliceVersionsForReconnect();
               this.applyFullState({
                 version: msg.version,
                 versions: msg.versions,
@@ -445,10 +1268,12 @@ class VirtualEngineService {
               });
               break;
             case 'state:matches':
+              this.resetSliceVersionsForReconnect();
               this.applySlice<VirtualMatch>('matches', msg.data, incomingSliceVer ?? msg.versions?.matches, val => {
                 this.matches = val;
                 this.matchSubscribers.forEach(cb => cb(this.matches));
               });
+              this.saveOfflineSnapshot(false);
               break;
             case 'state:tipster':
               this.applySlice<TipsterBetcode>('tipster', msg.data, incomingSliceVer ?? msg.versions?.tipster, val => {
@@ -747,6 +1572,7 @@ class VirtualEngineService {
       awayOdds: number;
     }>;
     dtmRules?: DtmMatchRule[];
+    h2hRecords?: H2HRecord[];
   }): Promise<RegisteredUser[] | null> {
     if (!this.adminToken) return null;
     const res = await fetch('/api/admin/cloud-sync', {
@@ -760,6 +1586,7 @@ class VirtualEngineService {
       clubs: data.clubs,
       leagues: data.leagues,
       matches: data.matches,
+      h2hRecords: data.h2hRecords,
       versions: data.versions,
     });
     return Array.isArray(data.users) ? (data.users as RegisteredUser[]) : null;
@@ -1171,13 +1998,17 @@ class VirtualEngineService {
   }
 
   private findSelectionH2HResult(sel: BetSelection, betTimestamp: number): H2HRecord | undefined {
+    const matchObj = this.matches.find(m => m.id === sel.matchId);
+    const embedded = Array.isArray(matchObj?.recentH2H) ? matchObj.recentH2H : [];
+    const pool = embedded.length > 0 ? [...embedded, ...this.h2hRecords] : this.h2hRecords;
+
     if (typeof sel.roundNumber === 'number') {
-      const byRound = this.h2hRecords.find(
+      const byRound = pool.find(
         r => r.matchId === sel.matchId && r.roundNumber === sel.roundNumber
       );
       if (byRound) return byRound;
     }
-    const matchingRecords = this.h2hRecords
+    const matchingRecords = pool
       .filter(r => r.matchId === sel.matchId && r.playedAt >= betTimestamp - 15000)
       .sort((a, b) => a.playedAt - b.playedAt);
     return matchingRecords[0];

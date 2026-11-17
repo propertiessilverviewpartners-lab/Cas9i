@@ -42,8 +42,8 @@ const INITIAL_LEAGUES: League[] = [
 ];
 
 const MATCH_DURATION_MINUTES = 60;
-const DAILY_MATCH_TARGET = 20;
-const MAX_LIVE_DAILY_MATCHES = 5;
+const DAILY_MATCH_TARGET = 100;
+const MAX_LIVE_DAILY_MATCHES = 10;
 const ZOOM_DAILY_TARGET = 50;
 const ZOOM_DURATION_SECONDS = 90;
 const ZOOM_WAVE_SIZE = 5;
@@ -1677,6 +1677,7 @@ function normalizeMatchShape(m: VirtualMatch): VirtualMatch {
     dayBucket: m.dayBucket || 'TODAY',
     matchDate: m.matchDate || getDayKey(0),
     odds: mergedOdds,
+    recentH2H: Array.isArray(m.recentH2H) ? m.recentH2H.slice(0, 25) : [],
   };
 }
 
@@ -2112,6 +2113,82 @@ function finalizeDtmMatchAtFullTime(updated: VirtualMatch, plan: DtmTargetPlan) 
   }
 }
 
+function getMatchPairH2H(homeTeam: string, awayTeam: string, limit = 25): H2HRecord[] {
+  const hNorm = homeTeam.trim().toLowerCase();
+  const aNorm = awayTeam.trim().toLowerCase();
+  return store.h2hRecords
+    .filter(r => {
+      const rh = r.homeTeam.trim().toLowerCase();
+      const ra = r.awayTeam.trim().toLowerCase();
+      return (rh === hNorm && ra === aNorm) || (rh === aNorm && ra === hNorm);
+    })
+    .sort((a, b) => b.playedAt - a.playedAt)
+    .slice(0, limit);
+}
+
+function appendH2HRecords(existing: H2HRecord[], incoming: H2HRecord[]): H2HRecord[] {
+  const byKey = new Map<string, H2HRecord>();
+  for (const rec of existing) {
+    if (!rec?.id) continue;
+    byKey.set(`${rec.matchId}:r${rec.roundNumber}`, rec);
+  }
+  for (const rec of incoming) {
+    if (!rec?.id) continue;
+    byKey.set(`${rec.matchId}:r${rec.roundNumber}`, rec);
+  }
+
+  const all = Array.from(byKey.values()).sort((a, b) => a.playedAt - b.playedAt);
+  const nonZoom = all.filter(r => !r.isZoom).slice(-1500);
+  const zoom = all.filter(r => r.isZoom).slice(-900);
+  return [...nonZoom, ...zoom].sort((a, b) => a.playedAt - b.playedAt);
+}
+
+function simulateNaturalGoalTick(updated: VirtualMatch, isZoomMatch: boolean, timeDisplay: number, isHomeGoal: boolean) {
+  if (!updated.firstGoalTeam) {
+    updated.firstGoalTeam = isHomeGoal ? 'home' : 'away';
+  }
+  if (updated.minute <= 5) {
+    updated.hadFiveMinGoal = true;
+  }
+
+  if (isHomeGoal) {
+    updated.homeScore += 1;
+    if (updated.minute <= 30) {
+      updated.firstHalfHomeScore = (updated.firstHalfHomeScore || 0) + 1;
+    }
+    updated.stats.shotsOnTargetHome += 1;
+    updated.events = [
+      {
+        minute: timeDisplay,
+        text: isZoomMatch
+          ? `GOAL (${timeDisplay}s)! ${updated.homeTeam} scores! (${updated.homeScore} - ${updated.awayScore})`
+          : `GOAL! ${updated.homeTeam} scores! (${updated.homeScore} - ${updated.awayScore})`,
+        type: 'goal',
+        team: 'home'
+      },
+      ...updated.events.slice(0, 10)
+    ];
+  } else {
+    updated.awayScore += 1;
+    if (updated.minute <= 30) {
+      updated.firstHalfAwayScore = (updated.firstHalfAwayScore || 0) + 1;
+    }
+    updated.stats.shotsOnTargetAway += 1;
+    updated.events = [
+      {
+        minute: timeDisplay,
+        text: isZoomMatch
+          ? `GOAL (${timeDisplay}s)! ${updated.awayTeam} scores! (${updated.homeScore} - ${updated.awayScore})`
+          : `GOAL! ${updated.awayTeam} finishes clinically! (${updated.homeScore} - ${updated.awayScore})`,
+        type: 'goal',
+        team: 'away'
+      },
+      ...updated.events.slice(0, 10)
+    ];
+  }
+  recalculateOddsOnGoal(updated);
+}
+
 function recordMatchResultToH2HAndReset(match: VirtualMatch, now: number): { resetMatch: VirtualMatch; record: H2HRecord } {
   const currentRound = match.roundNumber || 1;
   const record: H2HRecord = {
@@ -2145,6 +2222,9 @@ function recordMatchResultToH2HAndReset(match: VirtualMatch, now: number): { res
   const delayMs = isZoomMatch ? 20000 : 20 * 60000;
   const nextKickoffAt = now + delayMs;
   const startsInSeconds = Math.max(5, Math.ceil(delayMs / 1000));
+
+  const prevH2H = Array.isArray(match.recentH2H) ? match.recentH2H : [];
+  const nextRecentH2H = [record, ...prevH2H.filter(r => !(r.matchId === record.matchId && r.roundNumber === record.roundNumber))].slice(0, 25);
 
   const resetMatch: VirtualMatch = {
     ...match,
@@ -2184,6 +2264,7 @@ function recordMatchResultToH2HAndReset(match: VirtualMatch, now: number): { res
         type: 'whistle',
       },
     ],
+    recentH2H: nextRecentH2H,
   };
 
   return { resetMatch, record };
@@ -2208,9 +2289,11 @@ function buildClubPairsFromStore(targetCount: number): Array<{ home: Club; away:
 
   const pairs: Array<{ home: Club; away: Club; leagueName: string; country: string }> = [];
   const usedPairKeys = new Set<string>();
+  const maxIterations = Math.max(3000, targetCount * 35);
+  const uniqueGuardCutoff = Math.max(1400, targetCount * 16);
   let guard = 0;
 
-  while (pairs.length < targetCount && allLeaguePools.length > 0 && guard < 400) {
+  while (pairs.length < targetCount && allLeaguePools.length > 0 && guard < maxIterations) {
     const pool = allLeaguePools[guard % allLeaguePools.length];
     guard += 1;
     if (pool.clubs.length < 2) continue;
@@ -2221,7 +2304,7 @@ function buildClubPairsFromStore(targetCount: number): Array<{ home: Club; away:
     if (!home || !away || home.id === away.id) continue;
 
     const pairKey = [home.id, away.id].sort().join(':');
-    if (usedPairKeys.has(pairKey) && guard < 200) continue;
+    if (usedPairKeys.has(pairKey) && guard < uniqueGuardCutoff) continue;
     usedPairKeys.add(pairKey);
 
     const matchedLeague = store.leagues.find(l => l.name.toLowerCase() === pool.leagueName.toLowerCase());
@@ -2229,6 +2312,21 @@ function buildClubPairsFromStore(targetCount: number): Array<{ home: Club; away:
       home,
       away,
       leagueName: pool.leagueName,
+      country: matchedLeague?.country || home.country || 'International',
+    });
+  }
+
+  // Fallback across all clubs if league pools still fell short
+  while (pairs.length < targetCount && store.clubs.length >= 2) {
+    const shuffled = shuffleArray(store.clubs);
+    const home = shuffled[0];
+    const away = shuffled[1];
+    if (!home || !away || home.id === away.id) break;
+    const matchedLeague = store.leagues.find(l => l.name.toLowerCase() === home.league.toLowerCase());
+    pairs.push({
+      home,
+      away,
+      leagueName: home.league || 'Virtual League',
       country: matchedLeague?.country || home.country || 'International',
     });
   }
@@ -2248,9 +2346,8 @@ function createWaveMatch(
   const possessionHome = Math.max(30, Math.min(70, Math.round(((pair.home.attack + pair.home.defense) / totalPower) * 100)));
   const possessionAway = 100 - possessionHome;
 
-  // Wave timing:
-  // Today: 0 matches active right now; Wave 0 (5 matches) starts in 22-30m, each wave runs 60m with ~24m break between waves
-  // Next Day: 4 waves starting +24h from now
+  // Wave timing for 100 daily fixed matches (10 waves x 10 matches):
+  // Wave 0 starts in 4-13m, subsequent waves every 72m so all 100 play within the day + repeat rounds.
   const waveIdx = Math.floor(indexInDay / MAX_LIVE_DAILY_MATCHES);
   const slotInWave = indexInDay % MAX_LIVE_DAILY_MATCHES;
 
@@ -2263,11 +2360,11 @@ function createWaveMatch(
   const firstHalfAwayScore = 0;
 
   if (dayBucket === 'TODAY') {
-    const waveOffsetMins = 22 + waveIdx * 84 + slotInWave * 2;
+    const waveOffsetMins = 4 + waveIdx * 72 + slotInWave * 1;
     kickoffAt = now + waveOffsetMins * 60000;
   } else {
     const nextDayBase = now + 24 * 60 * 60000;
-    const waveOffsetMins = waveIdx * 90 + slotInWave * 5;
+    const waveOffsetMins = waveIdx * 72 + slotInWave * 2;
     kickoffAt = nextDayBase + waveOffsetMins * 60000;
   }
 
@@ -2312,6 +2409,7 @@ function createWaveMatch(
         type: 'whistle',
       },
     ],
+    recentH2H: getMatchPairH2H(pair.home.name, pair.away.name, 25),
   };
 }
 
@@ -2389,6 +2487,7 @@ function createZoomWaveMatch(
         type: 'whistle',
       },
     ],
+    recentH2H: getMatchPairH2H(pair.home.name, pair.away.name, 25),
   };
 }
 
@@ -2625,14 +2724,13 @@ function ensureDailyMatchesScheduled(): boolean {
     return normalized;
   });
   if (newStartupH2H.length > 0) {
-    store.h2hRecords = [...store.h2hRecords, ...newStartupH2H].slice(-600);
+    store.h2hRecords = appendH2HRecords(store.h2hRecords, newStartupH2H);
     changed = true;
   }
 
-  // If upgrading from v1 wave schedule (where Wave 0 started LIVE), refresh system daily matches to standby v2
-  if ((store.scheduleWaveVersion || 1) < 2) {
-    store.matches = store.matches.filter(m => !m.isSystemDaily);
-    store.scheduleWaveVersion = 2;
+  // Upgrade schedule version cleanly without wiping active fixtures/DTM targets
+  if ((store.scheduleWaveVersion || 1) < 3) {
+    store.scheduleWaveVersion = 3;
     changed = true;
   }
 
@@ -2655,7 +2753,7 @@ function ensureDailyMatchesScheduled(): boolean {
       const waveIdx = Math.floor(promotedIdx / MAX_LIVE_DAILY_MATCHES);
       const slotInWave = promotedIdx % MAX_LIVE_DAILY_MATCHES;
       promotedIdx += 1;
-      const kickoffAt = now + (22 + waveIdx * 84 + slotInWave * 2) * 60000;
+      const kickoffAt = now + (4 + waveIdx * 72 + slotInWave * 1) * 60000;
       return {
         ...m,
         dayBucket: 'TODAY',
@@ -2670,7 +2768,7 @@ function ensureDailyMatchesScheduled(): boolean {
     return m;
   });
 
-  // Ensure 20 TODAY main matches
+  // Ensure 100 TODAY main fixed matches
   const existingToday = store.matches.filter(m => !m.isZoom && m.dayBucket === 'TODAY' && m.isSystemDaily);
   const missingToday = Math.max(0, DAILY_MATCH_TARGET - existingToday.length);
   if (missingToday > 0 && store.clubs.length >= 2) {
@@ -2683,7 +2781,7 @@ function ensureDailyMatchesScheduled(): boolean {
     changed = true;
   }
 
-  // Ensure 20 NEXT_DAY (UPCOMING) main matches
+  // Ensure 100 NEXT_DAY (UPCOMING) main fixed matches
   const existingNextDay = store.matches.filter(m => !m.isZoom && m.dayBucket === 'NEXT_DAY' && m.isSystemDaily);
   const missingNextDay = Math.max(0, DAILY_MATCH_TARGET - existingNextDay.length);
   if (missingNextDay > 0 && store.clubs.length >= 2) {
@@ -2709,6 +2807,16 @@ function ensureDailyMatchesScheduled(): boolean {
     changed = true;
   }
 
+  // Ensure every match carries its recorded H2H history directly inside recentH2H
+  store.matches = store.matches.map(m => {
+    const pairRecs = getMatchPairH2H(m.homeTeam, m.awayTeam, 25);
+    if (pairRecs.length > 0 && (!Array.isArray(m.recentH2H) || m.recentH2H.length === 0)) {
+      changed = true;
+      return { ...m, recentH2H: pairRecs };
+    }
+    return m;
+  });
+
   // Ensure exactly one featured non-Zoom match if today matches exist
   const mainMatches = store.matches.filter(m => !m.isZoom);
   if (mainMatches.length > 0 && !mainMatches.some(m => m.isFeatured)) {
@@ -2719,7 +2827,7 @@ function ensureDailyMatchesScheduled(): boolean {
     }
   }
 
-  // Ensure 10 Tipster Betcodes analyzed from today's 20 daily matches
+  // Ensure 10 Tipster Betcodes analyzed from today's 100 daily matches
   const todayMain = store.matches.filter(m => !m.isZoom && m.dayBucket === 'TODAY');
   const todayMatchIds = new Set(todayMain.map(m => m.id));
   const tipsterStale =
@@ -2744,12 +2852,154 @@ function ensureDailyMatchesScheduled(): boolean {
   return changed;
 }
 
+function catchUpMatchesToNow(now: number): H2HRecord[] {
+  const recordedH2H: H2HRecord[] = [];
+  let anyChanged = false;
+
+  store.matches = store.matches.map(rawMatch => {
+    let working: VirtualMatch = {
+      ...rawMatch,
+      odds: {
+        ...rawMatch.odds,
+        correctScores: [...(rawMatch.odds.correctScores || [])],
+        overUnderLines: [...(rawMatch.odds.overUnderLines || [])],
+      },
+      stats: { ...rawMatch.stats },
+      events: [...rawMatch.events],
+      recentH2H: Array.isArray(rawMatch.recentH2H) ? [...rawMatch.recentH2H] : [],
+      oddsDirection: {},
+    };
+
+    const isZoom = Boolean(working.isZoom);
+    const durationMin = working.durationMinutes || MATCH_DURATION_MINUTES;
+    const zoomDurationSec = working.durationSeconds || ZOOM_DURATION_SECONDS;
+    const matchDurationMs = isZoom ? zoomDurationSec * 1000 : durationMin * 60000;
+    const resetDelayMs = isZoom ? 20000 : 20 * 60000;
+    const cycleMs = matchDurationMs + resetDelayMs;
+
+    // Fast-forward ancient downtime cycles so we catch up the last few concluded rounds cleanly
+    const maxRoundsToRecord = isZoom ? 3 : 8;
+    if (working.kickoffAt && now - working.kickoffAt > maxRoundsToRecord * cycleMs) {
+      const roundsToSkip = Math.floor((now - working.kickoffAt) / cycleMs) - maxRoundsToRecord;
+      if (roundsToSkip > 0) {
+        working.kickoffAt += roundsToSkip * cycleMs;
+        working.roundNumber = (working.roundNumber || 1) + roundsToSkip;
+        anyChanged = true;
+      }
+    }
+
+    let roundsProcessed = 0;
+    while (roundsProcessed < maxRoundsToRecord + 1) {
+      const kickoffMs = working.kickoffAt;
+      if (!kickoffMs || kickoffMs > now) {
+        break;
+      }
+
+      const elapsedMs = now - kickoffMs;
+      // Only simulate offline progress here if match is more than 3s past kickoff or past full-time
+      if (working.status === 'UPCOMING' && elapsedMs < 3000) {
+        break;
+      }
+
+      if (working.status === 'UPCOMING') {
+        working.status = 'LIVE';
+        working.minute = 1;
+        working.elapsedSeconds = isZoom ? 1 : undefined;
+        working.startsInSeconds = 0;
+        working.scheduledTime = 'Live Now';
+        working.events = [
+          {
+            minute: 1,
+            text: isZoom ? 'Kickoff! 90s Zoom simulation is LIVE.' : "Kickoff! 60' standard match is now LIVE.",
+            type: 'whistle',
+          },
+          ...working.events.slice(0, 9),
+        ];
+        anyChanged = true;
+      }
+
+      const activeDtmRule = findActiveDtmRuleForMatch(working);
+      const dtmPlan = activeDtmRule ? getOrBuildDtmPlan(working, activeDtmRule) : null;
+
+      if (isZoom) {
+        const targetSec = Math.min(zoomDurationSec, Math.max(1, Math.floor(elapsedMs / 1000) + 1));
+        const curSec = Math.max(0, working.elapsedSeconds || 0);
+        if (targetSec > curSec + 2 || elapsedMs >= matchDurationMs) {
+          const startTick = Math.max(1, Math.floor(curSec / 1.5) + 1);
+          const endTick = Math.floor((elapsedMs >= matchDurationMs ? zoomDurationSec : targetSec) / 1.5);
+          for (let t = startTick; t <= endTick; t += 1) {
+            const stepSec = Math.min(zoomDurationSec, Math.max(1, Math.round(t * 1.5)));
+            working.elapsedSeconds = stepSec;
+            working.minute = Math.min(60, Math.max(1, Math.ceil((stepSec / zoomDurationSec) * 60)));
+            if (dtmPlan) {
+              applyDtmLiveStep(working, dtmPlan, true, stepSec);
+            } else if (Math.random() < 0.24) {
+              const isHomeGoal = Math.random() < working.stats.possessionHome / 100;
+              simulateNaturalGoalTick(working, true, stepSec, isHomeGoal);
+            }
+          }
+          working.elapsedSeconds = targetSec;
+          working.minute = Math.min(60, Math.max(1, Math.ceil((targetSec / zoomDurationSec) * 60)));
+          anyChanged = true;
+        }
+      } else {
+        const targetMinute = Math.min(durationMin, Math.max(1, Math.floor(elapsedMs / 60000) + 1));
+        const curMinute = Math.max(0, working.minute || 0);
+        if (targetMinute > curMinute + 1 || elapsedMs >= matchDurationMs) {
+          const endMinute = elapsedMs >= matchDurationMs ? durationMin : targetMinute;
+          for (let m = Math.max(1, curMinute + 1); m <= endMinute; m += 1) {
+            working.minute = m;
+            if (dtmPlan) {
+              applyDtmLiveStep(working, dtmPlan, false, m);
+            } else {
+              // Matches 0.0088 per 1.5s * 40 ticks/min = ~0.352 expected goals per minute
+              if (Math.random() < 0.352) {
+                const isHomeGoal = Math.random() < working.stats.possessionHome / 100;
+                simulateNaturalGoalTick(working, false, m, isHomeGoal);
+              }
+            }
+          }
+          working.minute = targetMinute;
+          anyChanged = true;
+        }
+      }
+
+      if (elapsedMs >= matchDurationMs) {
+        if (dtmPlan) {
+          finalizeDtmMatchAtFullTime(working, dtmPlan);
+        }
+        const conclusionTime = kickoffMs + matchDurationMs;
+        const { resetMatch, record } = recordMatchResultToH2HAndReset(working, conclusionTime);
+        recordedH2H.push(record);
+        working = resetMatch;
+        anyChanged = true;
+        roundsProcessed += 1;
+      } else {
+        break;
+      }
+    }
+
+    return working;
+  });
+
+  if (recordedH2H.length > 0) {
+    store.h2hRecords = appendH2HRecords(store.h2hRecords, recordedH2H);
+    anyChanged = true;
+  }
+
+  if (anyChanged) {
+    saveStore(store);
+  }
+  return recordedH2H;
+}
+
 async function startServer() {
   if (!Array.isArray(store.fxAssets) || store.fxAssets.length === 0) {
     store.fxAssets = buildInitialFxAssets();
     saveStore(store);
   }
   ensureDailyMatchesScheduled();
+  catchUpMatchesToNow(Date.now());
 
   const app = express();
   app.use(express.json());
@@ -2843,8 +3093,10 @@ async function startServer() {
     }
 
     const now = Date.now();
-    let matchesChanged = false;
-    const newlyRecordedH2H: H2HRecord[] = [];
+    // Catch up any matches if process paused/slept or clock jumped forward
+    const catchupH2H = catchUpMatchesToNow(now);
+    let matchesChanged = catchupH2H.length > 0;
+    const newlyRecordedH2H: H2HRecord[] = [...catchupH2H];
     let currentLiveDailyCount = store.matches.filter(
       m => !m.isZoom && m.isSystemDaily && m.dayBucket === 'TODAY' && m.status === 'LIVE'
     ).length;
@@ -2859,6 +3111,7 @@ async function startServer() {
         },
         stats: { ...match.stats },
         events: [...match.events],
+        recentH2H: Array.isArray(match.recentH2H) ? [...match.recentH2H] : [],
         oddsDirection: {}
       };
       const isZoomMatch = Boolean(updated.isZoom);
@@ -2887,7 +3140,9 @@ async function startServer() {
             currentLiveDailyCount += 1;
           }
           updated.status = 'LIVE';
-          updated.kickoffAt = now;
+          if (!updated.kickoffAt || now - updated.kickoffAt < 4000) {
+            updated.kickoffAt = now;
+          }
           updated.minute = 1;
           updated.elapsedSeconds = isZoomMatch ? 1 : undefined;
           updated.startsInSeconds = 0;
@@ -2942,45 +3197,7 @@ async function startServer() {
             matchesChanged = true;
             const homeAdvantage = updated.stats.possessionHome / 100;
             const isHomeGoal = Math.random() < homeAdvantage;
-            if (!updated.firstGoalTeam) {
-              updated.firstGoalTeam = isHomeGoal ? 'home' : 'away';
-            }
-            if (updated.minute <= 5) {
-              updated.hadFiveMinGoal = true;
-            }
-
-            if (isHomeGoal) {
-              updated.homeScore += 1;
-              if (updated.minute <= 30) {
-                updated.firstHalfHomeScore = (updated.firstHalfHomeScore || 0) + 1;
-              }
-              updated.stats.shotsOnTargetHome += 1;
-              updated.events = [
-                {
-                  minute: elapsedSec,
-                  text: `GOAL (${elapsedSec}s)! ${updated.homeTeam} scores! (${updated.homeScore} - ${updated.awayScore})`,
-                  type: 'goal',
-                  team: 'home'
-                },
-                ...updated.events.slice(0, 10)
-              ];
-            } else {
-              updated.awayScore += 1;
-              if (updated.minute <= 30) {
-                updated.firstHalfAwayScore = (updated.firstHalfAwayScore || 0) + 1;
-              }
-              updated.stats.shotsOnTargetAway += 1;
-              updated.events = [
-                {
-                  minute: elapsedSec,
-                  text: `GOAL (${elapsedSec}s)! ${updated.awayTeam} scores! (${updated.homeScore} - ${updated.awayScore})`,
-                  type: 'goal',
-                  team: 'away'
-                },
-                ...updated.events.slice(0, 10)
-              ];
-            }
-            recalculateOddsOnGoal(updated);
+            simulateNaturalGoalTick(updated, true, elapsedSec, isHomeGoal);
           } else if (Math.random() < 0.22) {
             matchesChanged = true;
             microFluctuateOdds(updated);
@@ -3035,43 +3252,9 @@ async function startServer() {
               matchesChanged = true;
               const homeAdvantage = updated.stats.possessionHome / 100;
               const isHomeGoal = Math.random() < homeAdvantage;
-              if (!updated.firstGoalTeam) {
-                updated.firstGoalTeam = isHomeGoal ? 'home' : 'away';
-              }
-              if (updated.minute <= 5) {
-                updated.hadFiveMinGoal = true;
-              }
-
-              if (isHomeGoal) {
-                updated.homeScore += 1;
-                if (updated.minute <= 30) {
-                  updated.firstHalfHomeScore = (updated.firstHalfHomeScore || 0) + 1;
-                }
-                updated.stats.shotsOnTargetHome += 1;
-                const event: MatchEvent = {
-                  minute: updated.minute,
-                  text: `GOAL! ${updated.homeTeam} scores! (${updated.homeScore} - ${updated.awayScore})`,
-                  type: 'goal',
-                  team: 'home'
-                };
-                updated.events = [event, ...updated.events.slice(0, 10)];
-                broadcast('event:goal', { match: updated, text: `${updated.homeTeam} ⚽ GOAL!` });
-              } else {
-                updated.awayScore += 1;
-                if (updated.minute <= 30) {
-                  updated.firstHalfAwayScore = (updated.firstHalfAwayScore || 0) + 1;
-                }
-                updated.stats.shotsOnTargetAway += 1;
-                const event: MatchEvent = {
-                  minute: updated.minute,
-                  text: `GOAL! ${updated.awayTeam} finishes clinically! (${updated.homeScore} - ${updated.awayScore})`,
-                  type: 'goal',
-                  team: 'away'
-                };
-                updated.events = [event, ...updated.events.slice(0, 10)];
-                broadcast('event:goal', { match: updated, text: `${updated.awayTeam} ⚽ GOAL!` });
-              }
-              recalculateOddsOnGoal(updated);
+              simulateNaturalGoalTick(updated, false, updated.minute, isHomeGoal);
+              const scorerName = isHomeGoal ? updated.homeTeam : updated.awayTeam;
+              broadcast('event:goal', { match: updated, text: `${scorerName} ⚽ GOAL!` });
             } else if (Math.random() < 0.18) {
               matchesChanged = true;
               microFluctuateOdds(updated);
@@ -3094,7 +3277,7 @@ async function startServer() {
     });
 
     if (newlyRecordedH2H.length > 0) {
-      store.h2hRecords = [...store.h2hRecords, ...newlyRecordedH2H].slice(-600);
+      store.h2hRecords = appendH2HRecords(store.h2hRecords, newlyRecordedH2H);
       broadcast('state:h2h', store.h2hRecords);
       saveStore(store);
     }
@@ -3995,7 +4178,34 @@ async function startServer() {
       }
     }
 
-    if (usersChanged || clubsChanged || leaguesChanged || matchesChanged || dtmChanged) {
+    // Merge cloud-persisted H2H records (and update recentH2H embedded in matches)
+    const cloudH2H = Array.isArray(req.body?.h2hRecords) ? (req.body.h2hRecords as H2HRecord[]) : [];
+    let h2hChanged = false;
+    if (cloudH2H.length > 0) {
+      const existingIds = new Set(store.h2hRecords.map(r => `${r.matchId}:r${r.roundNumber}`));
+      const validIncoming = cloudH2H.filter(
+        r =>
+          r &&
+          typeof r.id === 'string' &&
+          typeof r.matchId === 'string' &&
+          typeof r.homeTeam === 'string' &&
+          typeof r.awayTeam === 'string' &&
+          typeof r.homeScore === 'number' &&
+          typeof r.awayScore === 'number' &&
+          !existingIds.has(`${r.matchId}:r${r.roundNumber}`)
+      );
+      if (validIncoming.length > 0) {
+        store.h2hRecords = appendH2HRecords(store.h2hRecords, validIncoming);
+        store.matches = store.matches.map(m => ({
+          ...m,
+          recentH2H: getMatchPairH2H(m.homeTeam, m.awayTeam, 25),
+        }));
+        h2hChanged = true;
+        matchesChanged = true;
+      }
+    }
+
+    if (usersChanged || clubsChanged || leaguesChanged || matchesChanged || dtmChanged || h2hChanged) {
       saveStore(store);
     }
 
@@ -4007,6 +4217,7 @@ async function startServer() {
     if (clubsChanged) broadcast('state:clubs', store.clubs);
     if (leaguesChanged) broadcast('state:leagues', store.leagues);
     if (matchesChanged) broadcast('state:matches', store.matches);
+    if (h2hChanged) broadcast('state:h2h', store.h2hRecords);
     for (const delId of removedUserIds) {
       broadcast('event:user-deleted', { userId: delId });
     }
@@ -4023,6 +4234,7 @@ async function startServer() {
       clubs: store.clubs,
       leagues: store.leagues,
       matches: store.matches,
+      h2hRecords: store.h2hRecords,
       dtmRules: store.dtmRules,
       versions: sliceVersions,
     });
@@ -4475,7 +4687,8 @@ async function startServer() {
       },
       events: [
         { minute: matchStatus === 'LIVE' ? 1 : 0, text: `Admin fixed fixture (60' std): ${homeClub.name} vs ${awayClub.name}.`, type: 'whistle' }
-      ]
+      ],
+      recentH2H: getMatchPairH2H(homeClub.name, awayClub.name, 25),
     };
 
     store.matches = [newMatch, ...store.matches];

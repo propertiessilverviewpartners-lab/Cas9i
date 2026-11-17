@@ -195,6 +195,34 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidH2HRecord(data) {
+      return data.keys().hasAll([
+          'id', 'matchId', 'roundNumber', 'league', 'homeTeam', 'awayTeam',
+          'homeScore', 'awayScore', 'firstHalfHomeScore', 'firstHalfAwayScore',
+          'isZoom', 'playedAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'matchId', 'roundNumber', 'league', 'homeTeam', 'awayTeam',
+          'homeScore', 'awayScore', 'firstHalfHomeScore', 'firstHalfAwayScore',
+          'firstGoalTeam', 'hadFiveMinGoal', 'isZoom', 'playedAt', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && data.matchId is string && data.matchId.size() >= 1 && data.matchId.size() <= 128
+        && data.roundNumber is number && data.roundNumber >= 1
+        && data.league is string && data.league.size() >= 1 && data.league.size() <= 120
+        && data.homeTeam is string && data.homeTeam.size() >= 1 && data.homeTeam.size() <= 100
+        && data.awayTeam is string && data.awayTeam.size() >= 1 && data.awayTeam.size() <= 100
+        && data.homeScore is number && data.homeScore >= 0 && data.homeScore <= 999
+        && data.awayScore is number && data.awayScore >= 0 && data.awayScore <= 999
+        && data.firstHalfHomeScore is number && data.firstHalfHomeScore >= 0 && data.firstHalfHomeScore <= 999
+        && data.firstHalfAwayScore is number && data.firstHalfAwayScore >= 0 && data.firstHalfAwayScore <= 999
+        && (!('firstGoalTeam' in data) || (data.firstGoalTeam in ['home', 'away']))
+        && (!('hadFiveMinGoal' in data) || data.hadFiveMinGoal is bool)
+        && data.isZoom is bool
+        && data.playedAt is number && data.playedAt > 0
+        && data.updatedAt is timestamp;
+    }
+
     // Admins registry
     match /admins/{adminUid} {
       allow get: if isSignedIn() && isValidId(adminUid) && (request.auth.uid == adminUid || isAdmin());
@@ -363,6 +391,23 @@ service cloud.firestore {
         && incoming().id == existing().id
         && incoming().updatedAt == request.time;
       allow delete: if isAdmin() && isValidId(ruleId);
+    }
+
+    // Concluded match Head-to-Head results
+    match /h2hRecords/{recordId} {
+      allow get: if isSignedIn() && isValidId(recordId);
+      allow list: if isBootstrappedAdmin();
+      allow create: if isAdmin()
+        && isValidId(recordId)
+        && isValidH2HRecord(incoming())
+        && incoming().id == recordId
+        && incoming().updatedAt == request.time;
+      allow update: if isAdmin()
+        && isValidId(recordId)
+        && isValidH2HRecord(incoming())
+        && incoming().id == existing().id
+        && incoming().updatedAt == request.time;
+      allow delete: if isAdmin() && isValidId(recordId);
     }
   }
 }

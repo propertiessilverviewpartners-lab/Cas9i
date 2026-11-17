@@ -47,6 +47,7 @@ import {
   deleteCloudMatch,
   upsertCloudDtmRule,
   deleteCloudDtmRule,
+  upsertCloudH2HRecord,
   type AdminCloudSnapshotState,
 } from '../services/firebaseSync';
 
@@ -315,13 +316,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     };
   }, [isCloudConnected]);
 
+  const syncedCloudH2HIdsRef = useRef<Set<string>>(new Set());
+
   // Subscribe to Firebase Admin Auth & live Firestore collections
   useEffect(() => {
     let unsubCloud: (() => void) | null = null;
+    let unsubH2H: (() => void) | null = null;
     const unsubAuth = subscribeFirebaseAuth(fbUser => {
       if (unsubCloud) {
         unsubCloud();
         unsubCloud = null;
+      }
+      if (unsubH2H) {
+        unsubH2H();
+        unsubH2H = null;
       }
 
       if (isFirebaseAdminUser(fbUser) && fbUser) {
@@ -334,6 +342,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           cloudSyncRef.current = cloudState;
           const deletedUsersSet = new Set(cloudState.deletedUserIds);
           const cloudUserIds = new Set(cloudState.users.map(cu => cu.user.id));
+          cloudState.h2hRecords.forEach(r => syncedCloudH2HIdsRef.current.add(r.id));
 
           void (async () => {
             const [localBefore, localRulesBefore] = await Promise.all([
@@ -348,6 +357,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               leagues: cloudState.leagues,
               matches: cloudState.matches,
               dtmRules: cloudState.dtmRules,
+              h2hRecords: cloudState.h2hRecords,
             });
             if (syncedUsers) {
               latestUsersRef.current = syncedUsers;
@@ -362,6 +372,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               if (!cr || lr.updatedAtMs > cr.updatedAtMs) {
                 void upsertCloudDtmRule(lr);
               }
+            }
+
+            // Push unseen non-Zoom H2H records up to Firestore (capped per batch for Spark quota safety)
+            const localNonZoomH2H = virtualEngine
+              .getH2HRecords()
+              .filter(r => !r.isZoom && !syncedCloudH2HIdsRef.current.has(r.id))
+              .slice(-100);
+            for (const rec of localNonZoomH2H) {
+              syncedCloudH2HIdsRef.current.add(rec.id);
+              void upsertCloudH2HRecord(rec);
             }
 
             // Push any locally-registered un-tombstoned users up to Firestore permanently
@@ -382,6 +402,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             }
           })();
         });
+
+        unsubH2H = virtualEngine.subscribeH2H(records => {
+          const unseen = records
+            .filter(r => !r.isZoom && !syncedCloudH2HIdsRef.current.has(r.id))
+            .slice(-50);
+          for (const rec of unseen) {
+            syncedCloudH2HIdsRef.current.add(rec.id);
+            void upsertCloudH2HRecord(rec);
+          }
+        });
       } else {
         cloudSyncRef.current = null;
         setIsCloudConnected(false);
@@ -392,6 +422,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     return () => {
       unsubAuth();
       if (unsubCloud) unsubCloud();
+      if (unsubH2H) unsubH2H();
     };
   }, []);
 

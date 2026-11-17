@@ -448,6 +448,72 @@
         }
       },
       "required": ["id", "matchId", "homeTeam", "awayTeam", "league", "enabled", "updatedAtMs", "updatedAt"]
+    },
+    "H2HRecordEntity": {
+      "title": "H2HRecordEntity",
+      "description": "Concluded match Head-to-Head result recorded permanently across sessions.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "matchId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "roundNumber": {
+          "type": "number"
+        },
+        "league": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "homeTeam": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "awayTeam": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "homeScore": {
+          "type": "number"
+        },
+        "awayScore": {
+          "type": "number"
+        },
+        "firstHalfHomeScore": {
+          "type": "number"
+        },
+        "firstHalfAwayScore": {
+          "type": "number"
+        },
+        "firstGoalTeam": {
+          "type": "string",
+          "enum": ["home", "away"]
+        },
+        "hadFiveMinGoal": {
+          "type": "boolean"
+        },
+        "isZoom": {
+          "type": "boolean"
+        },
+        "playedAt": {
+          "type": "number"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "matchId", "roundNumber", "league", "homeTeam", "awayTeam", "homeScore", "awayScore", "firstHalfHomeScore", "firstHalfAwayScore", "isZoom", "playedAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -486,6 +552,10 @@
     "/dtmRules/{ruleId}": {
       "schema": { "$ref": "#/entities/DtmRuleEntity" },
       "description": "Admin-only persistent match rules synced across Web and Mobile Admin dashboards."
+    },
+    "/h2hRecords/{recordId}": {
+      "schema": { "$ref": "#/entities/H2HRecordEntity" },
+      "description": "Concluded match H2H records persisted for cross-device history."
     }
   }
 }

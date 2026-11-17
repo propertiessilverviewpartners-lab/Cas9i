@@ -103,7 +103,7 @@ export const SportsView: React.FC<SportsViewProps> = ({
     .slice()
     .reverse();
 
-  const activeLiveToday = todayFiltered.filter(m => m.status === 'LIVE').slice(0, 5);
+  const activeLiveToday = todayFiltered.filter(m => m.status === 'LIVE');
   const isLiveFallbackUpcoming = activeLiveToday.length === 0;
   const fallbackNext20to30 = todayFiltered
     .filter(m => m.status === 'UPCOMING')
@@ -112,7 +112,7 @@ export const SportsView: React.FC<SportsViewProps> = ({
   const liveViewMatches =
     activeLiveToday.length > 0
       ? activeLiveToday
-      : (within20to30.length > 0 ? within20to30 : fallbackNext20to30).slice(0, 5);
+      : (within20to30.length > 0 ? within20to30 : fallbackNext20to30).slice(0, 10);
 
   const featuredMatch =
     todayAll.find(m => m.isFeatured) ||
@@ -375,7 +375,7 @@ export const SportsView: React.FC<SportsViewProps> = ({
               SCHEDULING DAILY FIXTURES
             </h3>
             <p className="text-xs text-zinc-400 max-w-md mx-auto mt-1 leading-relaxed">
-              20 daily matches and 20 next-day fixtures are automatically prepared from active leagues.
+              100 daily matches and 100 next-day fixtures are automatically prepared from active leagues.
             </p>
             {isAdmin && (
               <div className="flex flex-col sm:flex-row items-center justify-center gap-2 mt-4">
@@ -599,15 +599,15 @@ export const SportsView: React.FC<SportsViewProps> = ({
                 isLiveFallbackUpcoming ? (
                   <span className="text-amber-300 flex items-center gap-1">
                     <Clock className="w-3 h-3" />
-                    <span>No match is currently in-play · Next kickoff in 20–30 min</span>
+                    <span>No match is currently in-play · Next 10-match wave starts soon</span>
                   </span>
                 ) : (
                   <span className="text-[#00e700]">Showing {activeLiveToday.length} in-play matches (60&apos; standard)</span>
                 )
               ) : filterMode === 'VIRTUAL' ? (
-                <span>Today&apos;s Daily Matches ({todayFiltered.length}/20) · 60&apos; Standard</span>
+                <span>Today&apos;s Daily Matches ({todayFiltered.length}/100) · 60&apos; Standard</span>
               ) : filterMode === 'UPCOMING' ? (
-                <span>Next Day Fixed Matches ({nextDayFiltered.length}/20)</span>
+                <span>Next Day Fixed Matches ({nextDayFiltered.length}/100)</span>
               ) : (
                 <span>Top Featured Virtual Fixtures</span>
               )}
@@ -755,6 +755,14 @@ export const SportsView: React.FC<SportsViewProps> = ({
                   ]
                 : [];
 
+            const matchH2HMap = new Map<string, H2HRecord>();
+            (match.recentH2H || []).forEach(r => matchH2HMap.set(`${r.matchId}:r${r.roundNumber || 0}`, r));
+            h2hRecords
+              .filter(r => r.matchId === match.id)
+              .forEach(r => matchH2HMap.set(`${r.matchId}:r${r.roundNumber || 0}`, r));
+            const matchEmbeddedH2H = Array.from(matchH2HMap.values()).sort((a, b) => b.playedAt - a.playedAt);
+            const latestMatchFT = matchEmbeddedH2H[0];
+
             return (
               <div
                 key={match.id}
@@ -764,6 +772,14 @@ export const SportsView: React.FC<SportsViewProps> = ({
                 <div className="text-[10px] sm:text-[11px] font-bold text-zinc-400 flex items-center justify-between gap-2">
                   <span className="truncate">{match.league}</span>
                   <div className="flex items-center gap-1.5 shrink-0">
+                    {latestMatchFT && (
+                      <span
+                        className="px-1.5 py-0.5 rounded bg-[#03150b] border border-amber-400/30 text-amber-300 text-[9px] font-mono font-black"
+                        title={`Last concluded round R${latestMatchFT.roundNumber || 1}: ${latestMatchFT.homeScore}-${latestMatchFT.awayScore}`}
+                      >
+                        FT {latestMatchFT.homeScore}-{latestMatchFT.awayScore}
+                      </span>
+                    )}
                     <button
                       onClick={e => {
                         e.stopPropagation();
@@ -771,10 +787,10 @@ export const SportsView: React.FC<SportsViewProps> = ({
                         onOpenMatchDetail(match, 'H2H');
                       }}
                       className="px-1.5 py-0.5 rounded bg-[#072b19] hover:bg-[#0d4629] border border-[#00e700]/35 text-[#00e700] text-[9px] font-black flex items-center gap-0.5"
-                      title="View Previous to Current H2H"
+                      title="View Recorded Match H2H"
                     >
                       <History className="w-2.5 h-2.5" />
-                      <span>H2H</span>
+                      <span>H2H{matchEmbeddedH2H.length > 0 ? ` (${matchEmbeddedH2H.length})` : ''}</span>
                     </button>
                     <span className="text-[9px] font-black text-zinc-500">
                       {match.isZoom ? '90s' : "60'"} · R{match.roundNumber || 1}
